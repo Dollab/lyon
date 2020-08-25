@@ -1,5 +1,6 @@
+use crate::{Point, Rect, Size};
 use crate::scalar::Scalar;
-use crate::generic_math::{Point, Rect, Size, Transform2D};
+use crate::traits::Transformation;
 use crate::LineSegment;
 
 /// A 2D triangle defined by three points `a`, `b` and `c`.
@@ -21,11 +22,13 @@ impl<S: Scalar> Triangle<S> {
         let a = v0.cross(v2) * inv;
         let b = v2.cross(v1) * inv;
         let c = S::ONE - a - b;
+
         (a, b, c)
     }
 
     pub fn contains_point(&self, point: Point<S>) -> bool {
         let coords = self.get_barycentric_coords_for_point(point);
+
         coords.0 > S::ZERO && coords.1 > S::ZERO && coords.2 > S::ZERO
     }
 
@@ -39,46 +42,65 @@ impl<S: Scalar> Triangle<S> {
 
         let width = max_x - min_x;
         let height = max_y - min_y;
+
         Rect::new(Point::new(min_x, min_y), Size::new(width, height))
     }
 
     #[inline]
     pub fn ab(&self) -> LineSegment<S> {
-        LineSegment { from: self.a, to: self.b }
+        LineSegment {
+            from: self.a,
+            to: self.b,
+        }
     }
 
     #[inline]
     pub fn ba(&self) -> LineSegment<S> {
-        LineSegment { from: self.b, to: self.a }
+        LineSegment {
+            from: self.b,
+            to: self.a,
+        }
     }
 
     #[inline]
     pub fn bc(&self) -> LineSegment<S> {
-        LineSegment { from: self.b, to: self.c }
+        LineSegment {
+            from: self.b,
+            to: self.c,
+        }
     }
 
     #[inline]
     pub fn cb(&self) -> LineSegment<S> {
-        LineSegment { from: self.c, to: self.b }
+        LineSegment {
+            from: self.c,
+            to: self.b,
+        }
     }
 
     #[inline]
     pub fn ca(&self) -> LineSegment<S> {
-        LineSegment { from: self.c, to: self.a }
+        LineSegment {
+            from: self.c,
+            to: self.a,
+        }
     }
 
     #[inline]
     pub fn ac(&self) -> LineSegment<S> {
-        LineSegment { from: self.a, to: self.c }
+        LineSegment {
+            from: self.a,
+            to: self.c,
+        }
     }
 
     /// [Not implemented] Applies the transform to this triangle and returns the results.
     #[inline]
-    pub fn transform(&self, transform: &Transform2D<S>) -> Self {
+    pub fn transform<T: Transformation<S>>(&self, transform: &T) -> Self {
         Triangle {
-            a: transform.transform_point(&self.a),
-            b: transform.transform_point(&self.b),
-            c: transform.transform_point(&self.c)
+            a: transform.transform_point(self.a),
+            b: transform.transform_point(self.b),
+            c: transform.transform_point(self.c),
         }
     }
 
@@ -88,7 +110,7 @@ impl<S: Scalar> Triangle<S> {
         // A bounding rect check should speed this up dramatically.
         // Inlining and reusing intermediate computation of the intersections
         // functions below and using SIMD would help too.
-        return self.ab().intersects(&other.ab())
+        self.ab().intersects(&other.ab())
             || self.ab().intersects(&other.bc())
             || self.ab().intersects(&other.ac())
             || self.bc().intersects(&other.ab())
@@ -99,57 +121,52 @@ impl<S: Scalar> Triangle<S> {
             || self.ac().intersects(&other.ac())
             || self.contains_point(other.a)
             || other.contains_point(self.a)
-            || *self == *other;
+            || *self == *other
     }
 
     /// Test for triangle-segment intersection.
     #[inline]
     pub fn intersects_line_segment(&self, segment: &LineSegment<S>) -> bool {
-        return self.ab().intersects(segment)
+        self.ab().intersects(segment)
             || self.bc().intersects(segment)
             || self.ac().intersects(segment)
-            || self.contains_point(segment.from);
+            || self.contains_point(segment.from)
     }
 }
 
 #[cfg(test)]
-use crate::math::point;
+use crate::point;
 
 #[test]
 fn test_triangle_contains() {
-
-    assert!(
-        Triangle {
-            a: point(0.0, 0.0),
-            b: point(1.0, 0.0),
-            c: point(0.0, 1.0),
-        }.contains_point(point(0.2, 0.2))
-    );
-    assert!(
-        !Triangle {
-            a: point(0.0, 0.0),
-            b: point(1.0, 0.0),
-            c: point(0.0, 1.0),
-        }.contains_point(point(1.2, 0.2))
-    );
+    assert!(Triangle {
+        a: point(0.0, 0.0),
+        b: point(1.0, 0.0),
+        c: point(0.0, 1.0),
+    }
+    .contains_point(point(0.2, 0.2)));
+    assert!(!Triangle {
+        a: point(0.0, 0.0),
+        b: point(1.0, 0.0),
+        c: point(0.0, 1.0),
+    }
+    .contains_point(point(1.2, 0.2)));
 
     // Triangle vertex winding should not matter
-    assert!(
-        Triangle {
-            a: point(1.0, 0.0),
-            b: point(0.0, 0.0),
-            c: point(0.0, 1.0),
-        }.contains_point(point(0.2, 0.2))
-    );
+    assert!(Triangle {
+        a: point(1.0, 0.0),
+        b: point(0.0, 0.0),
+        c: point(0.0, 1.0),
+    }
+    .contains_point(point(0.2, 0.2)));
 
     // Point exactly on the edge counts as outside the triangle.
-    assert!(
-        !Triangle {
-            a: point(0.0, 0.0),
-            b: point(1.0, 0.0),
-            c: point(0.0, 1.0),
-        }.contains_point(point(0.0, 0.0))
-    );
+    assert!(!Triangle {
+        a: point(0.0, 0.0),
+        b: point(1.0, 0.0),
+        c: point(0.0, 1.0),
+    }
+    .contains_point(point(0.0, 0.0)));
 }
 
 #[test]

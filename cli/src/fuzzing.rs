@@ -1,16 +1,15 @@
+use commands::{FuzzCmd, Tessellator};
+use lyon::extra::debugging::find_reduced_test_case;
 use lyon::math::*;
 use lyon::path::Path;
-use lyon::tessellation::geometry_builder::NoOutput;
-use lyon::tessellation::{
-    StrokeOptions, StrokeTessellator,
-    FillOptions, FillTessellator,
-    OnError,
-};
-use lyon::extra::debugging::find_reduced_test_case;
-use rand;
-use commands::{FuzzCmd, Tessellator};
-use std::cmp::{min, max};
+use lyon::path::traits::PathBuilder;
 use lyon::tess2;
+use lyon::tessellation::geometry_builder::NoOutput;
+use lyon::tessellation::{FillTessellator, StrokeTessellator};
+use lyon::algorithms::hatching::*;
+use lyon::geom::LineSegment;
+use rand;
+use std::cmp::{max, min};
 
 fn random_point() -> Point {
     point(
@@ -32,7 +31,7 @@ fn generate_path(cmd: &FuzzCmd, iteration: u64) -> Path {
     loop {
         let num_cmds = 3 + rand::random::<u32>() % (target - num_points);
 
-        path.move_to(random_point());
+        path.begin(random_point());
         num_points += 1;
         for _ in 0..num_cmds {
             path.line_to(random_point());
@@ -52,9 +51,9 @@ pub fn run(cmd: FuzzCmd) -> bool {
     println!("----");
     println!(
         "Fuzzing {} tessellation:",
-        match (cmd.fill, cmd.stroke) {
-            (true, true) => "fill and stroke",
-            (_, true) => "stroke",
+        match (cmd.tess.fill, cmd.tess.stroke) {
+            (Some(..), Some(..)) => "fill and stroke",
+            (_, Some(..)) => "stroke",
             _ => "fill",
         }
     );
@@ -67,31 +66,24 @@ pub fn run(cmd: FuzzCmd) -> bool {
     println!("----");
     loop {
         let path = generate_path(&cmd, i);
-        if cmd.fill || !cmd.stroke {
+        if let Some(options) = cmd.tess.fill {
             let status = ::std::panic::catch_unwind(|| {
-                let options = FillOptions::default().on_error(
-                    if cmd.ignore_errors {
-                        OnError::Recover
-                    } else {
-                        OnError::Panic
-                    }
-                );
-                match cmd.tessellator {
+                match cmd.tess.tessellator {
                     Tessellator::Default => {
-                        let result = FillTessellator::new().tessellate_path(
+                        let result = FillTessellator::new().tessellate(
                             &path,
                             &options,
-                            &mut NoOutput::new()
+                            &mut NoOutput::new(),
                         );
                         if !cmd.ignore_errors {
                             result.unwrap();
                         }
                     }
                     Tessellator::Tess2 => {
-                        let result = tess2::FillTessellator::new().tessellate_path(
+                        let result = tess2::FillTessellator::new().tessellate(
                             &path,
                             &options,
-                            &mut NoOutput::new()
+                            &mut NoOutput::new(),
                         );
                         if !cmd.ignore_errors {
                             result.unwrap();
@@ -102,31 +94,61 @@ pub fn run(cmd: FuzzCmd) -> bool {
 
             if status.is_err() {
                 println!(" !! Error while tessellating");
-                println!("    Path #{} containing {} points", i, path.points().len());
-                find_reduced_test_case(
-                    path.as_slice(),
-                    &|path: Path| {
-                        FillTessellator::new().tessellate_path(
-                            &path,
-                            &FillOptions::default(),
-                            &mut NoOutput::new()
-                        ).is_err()
-                    },
-                );
+                println!("    Path #{}", i);
+                find_reduced_test_case(path.as_slice(), &|path: Path| {
+                    FillTessellator::new()
+                        .tessellate(&path, &options, &mut NoOutput::new())
+                        .is_err()
+                });
 
                 panic!("aborting");
             }
         }
-        if cmd.stroke {
-            StrokeTessellator::new().tessellate_path(
-                &path,
-                &StrokeOptions::default(),
-                &mut NoOutput::new()
-            ).unwrap();
+        if let Some(options) = cmd.tess.stroke {
+            StrokeTessellator::new()
+                .tessellate(&path, &options, &mut NoOutput::new())
+                .unwrap();
         }
+
+        if let Some(ref hatch) = cmd.tess.hatch {
+            let mut builder = Path::builder();
+            let mut hatcher = Hatcher::new();
+            hatcher.hatch_path(
+                path.iter(),
+                &hatch.options,
+                &mut RegularHatchingPattern {
+                    interval: hatch.spacing,
+                    callback: &mut |segment: &HatchSegment| {
+                        builder.add_line_segment(&LineSegment {
+                            from: segment.a.position,
+                            to: segment.b.position,
+                        });
+                    },
+                },
+            );
+            let _hatched_path = builder.build();
+        }
+
+        if let Some(ref dots) = cmd.tess.dots {
+            let mut builder = Path::builder();
+            let mut hatcher = Hatcher::new();
+            hatcher.dot_path(
+                path.iter(),
+                &dots.options,
+                &mut RegularDotPattern {
+                    row_interval: dots.spacing,
+                    column_interval: dots.spacing,
+                    callback: &mut |dot: &Dot| {
+                        builder.add_point(dot.position);
+                    },
+                },
+            );
+            let _dotted_path = builder.build();
+        }
+
         i += 1;
         if i % 500 == 0 {
-            println!(" -- tested {} paths (~{} points per path)", i, path.points().len());
+            println!(" -- tested {} paths", i);
         }
     }
 }

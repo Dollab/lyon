@@ -9,7 +9,7 @@ name = "lyon"
 path = "src/main.rs"
 
 [dependencies]
-lyon = { path = "../", features = ["svg", "extra", "libtess2", "debugger"]}
+lyon = { path = "../", features = ["svg", "extra", "libtess2", "debugger", "experimental"]}
 clap = "2.32.0"
 rand = "0.6"
 

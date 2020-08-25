@@ -1,97 +1,201 @@
 //! The default path data structure.
+//!
 
 use crate::builder::*;
-use crate::PathEvent;
-use crate::VertexId;
+use crate::geom::traits::Transformation;
 use crate::math::*;
-use crate::geom::{LineSegment, QuadraticBezierSegment, CubicBezierSegment, Arc};
+use crate::{AttributeStore, ControlPointId, EndpointId, Event, IdEvent, PathEvent, PositionStore};
+use crate::private::DebugValidator;
 
 use std::iter::IntoIterator;
-use std::ops;
-use std::mem;
+use std::u32;
+use std::fmt;
 
-/// Enumeration corresponding to the [PathEvent](https://docs.rs/lyon_core/*/lyon_core/events/enum.PathEvent.html) enum
+/// Enumeration corresponding to the [Event](https://docs.rs/lyon_core/*/lyon_core/events/enum.Event.html) enum
 /// without the parameters.
 ///
 /// This is used by the [Path](struct.Path.html) data structure to store path events a tad
 /// more efficiently.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-enum Verb {
-    MoveTo,
+pub(crate) enum Verb {
     LineTo,
     QuadraticTo,
     CubicTo,
+    Begin,
     Close,
+    End,
 }
 
 /// A simple path data structure.
 ///
-/// It can be created using a [Builder](struct.Builder.html), and can be iterated over.
-#[derive(Clone, Debug, Default)]
+/// # Custom attributes
+///
+/// Paths can store a fixed number of extra `f32` values per endpoint, called
+/// "custom attributes" or "interpolated attributes" through the documentation.
+/// These can be handy to represent arbitrary attributes such as variable colors,
+/// line width, etc.
+///
+/// See also:
+/// - [`BuilderWithAttributes`](struct.BuilderWithAttributes.html).
+/// - [`Path::builder_with_attributes`](struct.Path.html#method.builder_with_attributes).
+/// - [`Path::attributes`](struct.Path.html#method.attributes).
+///
+/// # Representation
+///
+/// Paths contain two buffers:
+/// - a buffer of commands (Begin, Line, Quadratic, Cubic, Close or End),
+/// - and a buffer of pairs of floats that can be endpoints control points or custom attributes.
+///
+/// The order of storage for points is determined by the sequence of commands.
+/// Custom attributes (if any) always directly follow endpoints. If there is an odd number
+/// of attributes, the last float of the each attribute sequence is set to zero and is not used.
+///
+/// ```ascii
+///  __________________________
+/// |       |      |         |
+/// | Begin | Line |Quadratic| ...
+/// |_______|______|_________|_
+///  __________________________________________________________________________
+/// |         |          |         |          |         |         |          |
+/// |start x,y|attributes| to x, y |attributes|ctrl x,y | to x, y |attributes| ...
+/// |_________|__________|_________|__________|_________|_________|__________|_
+/// ```
+///
+#[derive(Clone, Default)]
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct Path {
     points: Box<[Point]>,
     verbs: Box<[Verb]>,
+    num_attributes: usize,
 }
 
 /// A view on a `Path`.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub struct PathSlice<'l> {
-    points: &'l [Point],
-    verbs: &'l [Verb],
+    pub(crate) points: &'l [Point],
+    pub(crate) verbs: &'l [Verb],
+    pub(crate) num_attributes: usize,
 }
 
 impl Path {
-    /// Creates a [Builder](struct.Builder.html) to create a path.
-    pub fn builder() -> Builder { Builder::new() }
+    /// Creates a [Builder](struct.Builder.html) to build a path.
+    pub fn builder() -> Builder {
+        Builder::new()
+    }
+
+    /// Creates a [BuilderWithAttributes](struct.BuilderWithAttributes.html) to build a path
+    /// with custom attributes.
+    pub fn builder_with_attributes(num_attributes: usize) -> BuilderWithAttributes {
+        BuilderWithAttributes::new(num_attributes)
+    }
+
+    /// Creates an [WithSvg](../builder/struct.WithSvg.html) to build a path
+    /// with a rich set of commands.
+    pub fn svg_builder() -> WithSvg<Builder> {
+        WithSvg::new(Self::builder())
+    }
 
     /// Creates an Empty `Path`.
+    #[inline]
     pub fn new() -> Path {
         Path {
             points: Box::new([]),
             verbs: Box::new([]),
+            num_attributes: 0,
         }
     }
 
     /// Returns a view on this `Path`.
+    #[inline]
     pub fn as_slice(&self) -> PathSlice {
         PathSlice {
             points: &self.points[..],
             verbs: &self.verbs[..],
+            num_attributes: self.num_attributes,
         }
+    }
+
+    /// Returns a slice over an endpoint's custom attributes.
+    #[inline]
+    pub fn attributes(&self, endpoint: EndpointId) -> &[f32] {
+        interpolated_attributes(self.num_attributes, &self.points, endpoint)
     }
 
     /// Iterates over the entire `Path`.
-    pub fn iter(&self) -> Iter { Iter::new(&self.points[..], &self.verbs[..]) }
-
-    pub fn points(&self) -> &[Point] { &self.points[..] }
-
-    pub fn mut_points(&mut self) -> &mut [Point] { &mut self.points[..] }
-
-    /// Concatenate two paths.
-    pub fn merge(&self, other: &Self) -> Self {
-        let mut verbs = Vec::with_capacity(self.verbs.len() + other.verbs.len());
-        let mut points = Vec::with_capacity(self.points.len() + other.points.len());
-        verbs.extend_from_slice(&self.verbs);
-        verbs.extend_from_slice(&other.verbs);
-        points.extend_from_slice(&self.points);
-        points.extend_from_slice(&other.points);
-
-        Path {
-            verbs: verbs.into_boxed_slice(),
-            points: points.into_boxed_slice(),
-        }
+    pub fn iter(&self) -> Iter {
+        Iter::new(self.num_attributes, &self.points[..], &self.verbs[..])
     }
 
-    /// Returns a `Cursor` pointing to the start of this `Path`.
-    pub fn cursor(&self) -> Cursor {
-        Cursor {
-            vertex: VertexId(0),
-            verb: 0,
-            first_vertex: VertexId(0),
-            first_verb: 0,
+    /// Iterates over the endpoint and control point ids of the `Path`.
+    pub fn id_iter(&self) -> IdIter {
+        IdIter::new(self.num_attributes, &self.verbs[..])
+    }
+
+    pub fn iter_with_attributes(&self) -> IterWithAttributes {
+        IterWithAttributes::new(self.num_attributes(), &self.points[..], &self.verbs[..])
+    }
+
+    /// Applies a transform to all endpoints and control points of this path and
+    /// Returns the result.
+    pub fn transformed<T: Transformation<f32>>(mut self, transform: &T) -> Self {
+        self.apply_transform(transform);
+
+        self
+    }
+
+    /// Returns a reversed version of this path with edge loops specified in the opposite
+    /// order.
+    pub fn reversed(&self) -> Self {
+        reverse_path(self.as_slice())
+    }
+
+    fn apply_transform<T: Transformation<f32>>(&mut self, transform: &T) {
+        let iter = IdIter::new(self.num_attributes, &self.verbs[..]);
+
+        for evt in iter {
+            match evt {
+                IdEvent::Begin { at } => {
+                    self.points[at.to_usize()] =
+                        transform.transform_point(self.points[at.to_usize()]);
+                }
+                IdEvent::Line { to, .. } => {
+                    self.points[to.to_usize()] =
+                        transform.transform_point(self.points[to.to_usize()]);
+                }
+                IdEvent::Quadratic { ctrl, to, .. } => {
+                    self.points[ctrl.to_usize()] =
+                        transform.transform_point(self.points[ctrl.to_usize()]);
+                    self.points[to.to_usize()] =
+                        transform.transform_point(self.points[to.to_usize()]);
+                }
+                IdEvent::Cubic {
+                    ctrl1, ctrl2, to, ..
+                } => {
+                    self.points[ctrl1.to_usize()] =
+                        transform.transform_point(self.points[ctrl1.to_usize()]);
+                    self.points[ctrl2.to_usize()] =
+                        transform.transform_point(self.points[ctrl2.to_usize()]);
+                    self.points[to.to_usize()] =
+                        transform.transform_point(self.points[to.to_usize()]);
+                }
+                IdEvent::End { .. } => {}
+            }
         }
+    }
+}
+
+impl std::ops::Index<EndpointId> for Path {
+    type Output = Point;
+    fn index(&self, id: EndpointId) -> &Point {
+        &self.points[id.to_usize()]
+    }
+}
+
+impl std::ops::Index<ControlPointId> for Path {
+    type Output = Point;
+    fn index(&self, id: ControlPointId) -> &Point {
+        &self.points[id.to_usize()]
     }
 }
 
@@ -99,7 +203,9 @@ impl<'l> IntoIterator for &'l Path {
     type Item = PathEvent;
     type IntoIter = Iter<'l>;
 
-    fn into_iter(self) -> Iter<'l> { self.iter() }
+    fn into_iter(self) -> Iter<'l> {
+        self.iter()
+    }
 }
 
 impl<'l> Into<PathSlice<'l>> for &'l Path {
@@ -108,389 +214,450 @@ impl<'l> Into<PathSlice<'l>> for &'l Path {
     }
 }
 
+impl PositionStore for Path {
+    fn get_endpoint(&self, id: EndpointId) -> Point {
+        self.points[id.to_usize()]
+    }
+
+    fn get_control_point(&self, id: ControlPointId) -> Point {
+        self.points[id.to_usize()]
+    }
+}
+
+impl AttributeStore for Path {
+    fn get(&self, id: EndpointId) -> &[f32] {
+        interpolated_attributes(self.num_attributes, &self.points, id)
+    }
+
+    fn num_attributes(&self) -> usize {
+        self.num_attributes
+    }
+}
+
+impl fmt::Debug for Path {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        self.as_slice().fmt(formatter)
+    }
+}
+
 /// An immutable view over a Path.
 impl<'l> PathSlice<'l> {
-
+    /// Iterates over the path.
     pub fn iter<'a>(&'a self) -> Iter<'l> {
-        Iter::new(self.points, self.verbs)
+        Iter::new(self.num_attributes, self.points, self.verbs)
     }
 
-    pub fn iter_from(&self, cursor: Cursor) -> Iter {
-        Iter::new(
-            &self.points[cursor.vertex.offset() as usize..],
-            &self.verbs[cursor.verb as usize..],
-        )
+    /// Iterates over the endpoint and control point ids of the `Path`.
+    pub fn id_iter(&self) -> IdIter {
+        IdIter::new(self.num_attributes, self.verbs)
     }
 
-    pub fn iter_until(&self, cursor: Cursor) -> Iter {
-        Iter::new(
-            &self.points[..cursor.vertex.offset() as usize],
-            &self.verbs[..cursor.verb as usize],
-        )
+    pub fn is_empty(&self) -> bool {
+        self.verbs.is_empty()
     }
 
-    pub fn iter_range(&self, cursor: ops::Range<Cursor>) -> Iter {
-        Iter::new(
-            &self.points[cursor.start.vertex.offset() as usize .. cursor.end.vertex.offset() as usize],
-            &self.verbs[cursor.start.verb as usize .. cursor.end.verb as usize],
-        )
+    /// Returns a slice over an endpoint's custom attributes.
+    #[inline]
+    pub fn attributes(&self, endpoint: EndpointId) -> &[f32] {
+        interpolated_attributes(self.num_attributes, &self.points, endpoint)
     }
+}
 
-    pub fn points(&self) -> &[Point] { self.points }
+impl<'l> fmt::Debug for PathSlice<'l> {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        fn write_point(formatter: &mut fmt::Formatter, point: Point) -> fmt::Result {
+            write!(formatter, " ")?;
+            fmt::Debug::fmt(&point.x, formatter)?;
+            write!(formatter, " ")?;
+            fmt::Debug::fmt(&point.y, formatter)
+        }
+
+        write!(formatter, "\"")?;
+        for evt in self {
+            match evt {
+                PathEvent::Begin { at } => {
+                    write!(formatter, " M")?;
+                    write_point(formatter, at)?;
+                }
+                PathEvent::End { close, .. } => {
+                    if close {
+                        write!(formatter, " Z")?;
+                    }
+                }
+                PathEvent::Line { to, .. } => {
+                    write!(formatter, " L")?;
+                    write_point(formatter, to)?;
+                }
+                PathEvent::Quadratic { ctrl, to, .. } => {
+                    write!(formatter, " Q")?;
+                    write_point(formatter, ctrl)?;
+                    write_point(formatter, to)?;
+                }
+                PathEvent::Cubic { ctrl1, ctrl2, to, .. } => {
+                    write!(formatter, " C")?;
+                    write_point(formatter, ctrl1)?;
+                    write_point(formatter, ctrl2)?;
+                    write_point(formatter, to)?;
+                }
+            }
+        }
+
+        write!(formatter, "\"")
+    }
+}
+
+impl<'l> std::ops::Index<EndpointId> for PathSlice<'l> {
+    type Output = Point;
+    fn index(&self, id: EndpointId) -> &Point {
+        &self.points[id.to_usize()]
+    }
+}
+
+impl<'l> std::ops::Index<ControlPointId> for PathSlice<'l> {
+    type Output = Point;
+    fn index(&self, id: ControlPointId) -> &Point {
+        &self.points[id.to_usize()]
+    }
 }
 
 impl<'l> IntoIterator for PathSlice<'l> {
     type Item = PathEvent;
     type IntoIter = Iter<'l>;
 
-    fn into_iter(self) -> Iter<'l> { self.iter() }
+    fn into_iter(self) -> Iter<'l> {
+        self.iter()
+    }
 }
 
 impl<'l, 'a> IntoIterator for &'a PathSlice<'l> {
     type Item = PathEvent;
     type IntoIter = Iter<'l>;
 
-    fn into_iter(self) -> Iter<'l> { self.iter() }
+    fn into_iter(self) -> Iter<'l> {
+        self.iter()
+    }
 }
 
-/// Builds path object using the FlatPathBuilder interface.
-///
-/// See the [builder module](builder/index.html) documentation.
+impl<'l> PositionStore for PathSlice<'l> {
+    fn get_endpoint(&self, id: EndpointId) -> Point {
+        self.points[id.to_usize()]
+    }
+
+    fn get_control_point(&self, id: ControlPointId) -> Point {
+        self.points[id.to_usize()]
+    }
+}
+
+impl<'l> AttributeStore for PathSlice<'l> {
+    fn get(&self, id: EndpointId) -> &[f32] {
+        interpolated_attributes(self.num_attributes, self.points, id)
+    }
+
+    fn num_attributes(&self) -> usize {
+        self.num_attributes
+    }
+}
+
+/// The default builder for `Path`.
 pub struct Builder {
-    points: Vec<Point>,
-    verbs: Vec<Verb>,
-    current_position: Point,
-    first_position: Point,
-    first_vertex: VertexId,
-    first_verb: u32,
-    need_moveto: bool,
+    pub(crate) points: Vec<Point>,
+    pub(crate) verbs: Vec<Verb>,
+    validator: DebugValidator,
 }
 
 impl Builder {
-    pub fn new() -> Self { Builder::with_capacity(128) }
-
-    pub fn with_capacity(cap: usize) -> Self {
+    pub fn new() -> Self {
         Builder {
-            points: Vec::with_capacity(cap),
-            verbs: Vec::with_capacity(cap),
-            current_position: Point::new(0.0, 0.0),
-            first_position: Point::new(0.0, 0.0),
-            first_vertex: VertexId(0),
-            first_verb: 0,
-            need_moveto: true,
+            points: Vec::new(),
+            verbs: Vec::new(),
+            validator: DebugValidator::new(),
         }
     }
 
-    pub fn with_svg(self) -> SvgPathBuilder<Self> { SvgPathBuilder::new(self) }
-
-    pub fn flattened(self, tolerance: f32) -> FlatteningBuilder<Self> {
-        FlatteningBuilder::new(self, tolerance)
+    pub fn with_capacity(points: usize, edges: usize) -> Self {
+        Builder {
+            points: Vec::with_capacity(points),
+            verbs: Vec::with_capacity(edges),
+            validator: DebugValidator::new(),
+        }
     }
 
-    pub fn move_to(&mut self, to: Point) {
-        nan_check(to);
-        self.need_moveto = false;
-        self.first_position = to;
-        self.first_vertex = VertexId(self.points.len() as u32);
-        self.first_verb = self.verbs.len() as u32;
-        self.current_position = to;
-        self.points.push(to);
-        self.verbs.push(Verb::MoveTo);
+    pub fn with_svg(self) -> WithSvg<Self> {
+        assert!(self.verbs.is_empty());
+        WithSvg::new(self)
     }
 
-    pub fn line_to(&mut self, to: Point) {
+    #[inline]
+    pub fn begin(&mut self, at: Point) -> EndpointId {
+        self.validator.begin();
+        nan_check(at);
+
+        let id = EndpointId(self.points.len() as u32);
+        self.points.push(at);
+        self.verbs.push(Verb::Begin);
+
+        id
+    }
+
+    #[inline]
+    pub fn end(&mut self, close: bool) {
+        self.validator.end();
+
+        self.verbs.push(if close { Verb::Close } else { Verb::End });
+    }
+
+    #[inline]
+    pub fn close(&mut self) {
+        self.end(true);
+    }
+
+    #[inline]
+    pub fn open(&mut self) {
+        self.validator.open();
+        self.verbs.pop();
+    }
+
+    #[inline]
+    pub fn pop(&mut self) {
+        self.validator.pop();
+        let verb = self.verbs.pop();
+        match verb {
+            Some(Verb::LineTo) => {
+                self.points.pop();
+            }
+            Some(Verb::QuadraticTo) => {
+                self.points.pop();
+                self.points.pop();
+            }
+            Some(Verb::CubicTo) => {
+                self.points.pop();
+                self.points.pop();
+                self.points.pop();
+            }
+            _ => ()
+        };
+    }
+
+    #[inline]
+    pub fn line_to(&mut self, to: Point) -> EndpointId {
+        self.validator.edge();
         nan_check(to);
-        self.move_to_if_needed();
+
+        let id = EndpointId(self.points.len() as u32);
         self.points.push(to);
         self.verbs.push(Verb::LineTo);
-        self.current_position = to;
+
+        id
     }
 
-    pub fn close(&mut self) {
-        // Relative path ops tend to accumulate small floating point imprecisions
-        // which results in the last segment ending almost but not quite at the
-        // start of the sub-path, causing a new edge to be inserted which often
-        // intersects with the first or last edge. This can affect algorithms that
-        // Don't handle self-intersecting paths.
-        // Deal with this by snapping the last point if it is very close to the
-        // start of the sub path.
-        if let Some(p) = self.points.last_mut() {
-            let d = (*p - self.first_position).abs();
-            if d.x + d.y < 0.0001 {
-                *p = self.first_position;
-            }
-        }
-
-        self.verbs.push(Verb::Close);
-        self.current_position = self.first_position;
-        self.need_moveto = true;
-    }
-
-    pub fn quadratic_bezier_to(&mut self, ctrl: Point, to: Point) {
+    #[inline]
+    pub fn quadratic_bezier_to(&mut self, ctrl: Point, to: Point) -> EndpointId {
+        self.validator.edge();
         nan_check(ctrl);
         nan_check(to);
-        self.move_to_if_needed();
+
         self.points.push(ctrl);
+        let id = EndpointId(self.points.len() as u32);
         self.points.push(to);
         self.verbs.push(Verb::QuadraticTo);
-        self.current_position = to;
+
+        id
     }
 
-    pub fn cubic_bezier_to(&mut self, ctrl1: Point, ctrl2: Point, to: Point) {
+    #[inline]
+    pub fn cubic_bezier_to(&mut self, ctrl1: Point, ctrl2: Point, to: Point) -> EndpointId {
+        self.validator.edge();
         nan_check(ctrl1);
         nan_check(ctrl2);
         nan_check(to);
-        self.move_to_if_needed();
+
         self.points.push(ctrl1);
         self.points.push(ctrl2);
+        let id = EndpointId(self.points.len() as u32);
         self.points.push(to);
         self.verbs.push(Verb::CubicTo);
-        self.current_position = to;
+
+        id
     }
 
-    pub fn arc(
-        &mut self,
-        center: Point,
-        radii: Vector,
-        sweep_angle: Angle,
-        x_rotation: Angle
-    ) {
-        nan_check(center);
-        nan_check(radii.to_point());
-        debug_assert!(!sweep_angle.get().is_nan());
-        debug_assert!(!x_rotation.get().is_nan());
-
-        let start_angle = (self.current_position - center).angle_from_x_axis() - x_rotation;
-        let arc = Arc { start_angle, center, radii, sweep_angle, x_rotation };
-        arc.for_each_quadratic_bezier(&mut|curve| {
-            self.quadratic_bezier_to(curve.ctrl, curve.to);
-        });
-    }
-
-    /// Add a closed polygon.
-    pub fn polygon(&mut self, points: &[Point]) {
-        self.points.reserve(points.len());
-        self.verbs.reserve(points.len() + 1);
-        build_polygon(self, points);
-    }
-
-    fn move_to_if_needed(&mut self) {
-        if self.need_moveto {
-            let first = self.first_position;
-            self.move_to(first);
-        }
-    }
-
-    pub fn current_position(&self) -> Point { self.current_position }
-
-    /// Returns a cursor to the next path event.
-    pub fn cursor(&self) -> Cursor {
-        if let Some(verb) = self.verbs.last() {
-            let p = self.points.len() - n_stored_points(*verb) as usize;
-
-            Cursor {
-                vertex: VertexId::from_usize(p),
-                verb: self.verbs.len() as u32 - 1,
-                first_vertex: self.first_vertex,
-                first_verb: self.first_verb,
-            }
-        } else {
-            Cursor {
-                vertex: VertexId(0),
-                verb: 0,
-                first_vertex: VertexId(0),
-                first_verb: 0,
-            }
-        }
-    }
-
+    #[inline]
     pub fn build(self) -> Path {
+        self.validator.build();
         Path {
             points: self.points.into_boxed_slice(),
             verbs: self.verbs.into_boxed_slice(),
+            num_attributes: 0,
+        }
+    }
+
+    pub fn path_event(&mut self, event: PathEvent) {
+        match event {
+            PathEvent::Begin { at } => {
+                self.begin(at);
+            }
+            PathEvent::Line { to, .. } => {
+                self.line_to(to);
+            }
+            PathEvent::Quadratic { ctrl, to, .. } => {
+                self.quadratic_bezier_to(ctrl, to);
+            }
+            PathEvent::Cubic { ctrl1, ctrl2, to, .. } => {
+                self.cubic_bezier_to(ctrl1, ctrl2, to);
+            }
+            PathEvent::End { close: true, .. } => {
+                self.end(true);
+            }
+            PathEvent::End { close: false, .. } => {
+                self.end(false);
+            }
+        }
+    }
+
+    pub fn reserve(&mut self, endpoints: usize, ctrl_points: usize) {
+        self.points.reserve(endpoints + ctrl_points);
+        self.verbs.reserve(endpoints);
+    }
+
+    #[inline]
+    pub fn concatenate(&mut self, paths: &[PathSlice]) {
+        concatenate_paths(&mut self.points, &mut self.verbs, paths, 0);
+    }
+}
+
+impl PathBuilder for Builder {
+    fn begin(&mut self, at: Point) -> EndpointId {
+        self.begin(at)
+    }
+
+    fn end(&mut self, close: bool) {
+        self.end(close);
+    }
+
+    fn line_to(&mut self, to: Point) -> EndpointId {
+        self.line_to(to)
+    }
+
+    fn quadratic_bezier_to(&mut self, ctrl: Point, to: Point) -> EndpointId {
+        self.quadratic_bezier_to(ctrl, to)
+    }
+
+    fn cubic_bezier_to(&mut self, ctrl1: Point, ctrl2: Point, to: Point) -> EndpointId {
+        self.cubic_bezier_to(ctrl1, ctrl2, to)
+    }
+
+    fn reserve(&mut self, endpoints: usize, ctrl_points: usize) {
+        self.reserve(endpoints, ctrl_points);
+    }
+}
+
+impl Build for Builder {
+    type PathType = Path;
+
+    fn build(self) -> Path {
+        self.build()
+    }
+}
+
+/// A builder for `Path` with custom attributes.
+///
+/// Custom attributes are a fixed number of `f32` values associated with each endpoint.
+/// All endpoints must have the same number of custom attributes,
+pub struct BuilderWithAttributes {
+    pub(crate) builder: Builder,
+    pub(crate) num_attributes: usize,
+}
+
+impl BuilderWithAttributes {
+
+    pub fn new(num_attributes: usize) -> Self {
+        BuilderWithAttributes {
+            builder: Builder::new(),
+            num_attributes: num_attributes,
+        }
+    }
+
+    pub fn reserve(&mut self, endpoints: usize, ctrl_points: usize) {
+        let attr = self.num_attributes / 2 + self.num_attributes % 2;
+        let n_points = endpoints * (1 + attr) + ctrl_points;
+        self.builder.points.reserve(n_points);
+        self.builder.verbs.reserve(endpoints);
+    }
+
+    #[inline]
+    pub fn begin(&mut self, at: Point, attributes: &[f32]) -> EndpointId {
+        let id = self.builder.begin(at);
+        self.push_attributes(attributes);
+
+        id
+    }
+
+    #[inline]
+    pub fn end(&mut self, close: bool) {
+        self.builder.end(close);
+    }
+
+    #[inline]
+    pub fn close(&mut self) {
+        self.builder.end(true);
+    }
+
+    #[inline]
+    pub fn line_to(&mut self, to: Point, attributes: &[f32]) -> EndpointId {
+        let id = self.builder.line_to(to);
+        self.push_attributes(attributes);
+
+        id
+    }
+
+    #[inline]
+    pub fn quadratic_bezier_to(&mut self, ctrl: Point, to: Point, attributes: &[f32]) -> EndpointId {
+        let id = self.builder.quadratic_bezier_to(ctrl, to);
+        self.push_attributes(attributes);
+
+        id
+    }
+
+    #[inline]
+    pub fn cubic_bezier_to(&mut self, ctrl1: Point, ctrl2: Point, to: Point, attributes: &[f32]) -> EndpointId {
+        let id = self.builder.cubic_bezier_to(ctrl1, ctrl2, to);
+        self.push_attributes(attributes);
+
+        id
+    }
+
+    #[inline]
+    pub fn build(self) -> Path {
+        self.builder.validator.build();
+        Path {
+            points: self.builder.points.into_boxed_slice(),
+            verbs: self.builder.verbs.into_boxed_slice(),
+            num_attributes: self.num_attributes,
+        }
+    }
+
+    #[inline]
+    pub fn concatenate(&mut self, paths: &[PathSlice]) {
+        concatenate_paths(
+            &mut self.builder.points,
+            &mut self.builder.verbs,
+            paths,
+            self.num_attributes,
+        );
+    }
+
+    fn push_attributes(&mut self, attributes: &[f32]) {
+        assert_eq!(attributes.len(), self.num_attributes);
+        for i in 0..(self.num_attributes / 2) {
+            let x = attributes[i * 2];
+            let y = attributes[i * 2 + 1];
+            self.builder.points.push(point(x, y));
+        }
+        if self.num_attributes % 2 == 1 {
+            let x = attributes[self.num_attributes - 1];
+            self.builder.points.push(point(x, 0.0));
         }
     }
 }
-
-/// A cursor refers to an event within a Path.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-pub struct Cursor {
-    vertex: VertexId,
-    verb: u32,
-    first_vertex: VertexId,
-    first_verb: u32,
-}
-
-impl Cursor {
-    /// Move the cursor to the next event in the `Path`.
-    ///
-    /// Returns false if the cursor is already at the last event.
-    pub fn next<'l, P>(&mut self, path: P) -> bool
-    where P : Into<PathSlice<'l>> {
-        next_cursor(self, &path.into().verbs)
-    }
-
-    /// Move the cursor to the previous event in the `Path`.
-    ///
-    /// Returns false if the cursor is already at the first event.
-    pub fn previous<'l, P>(&mut self, path: P) -> bool
-    where P : Into<PathSlice<'l>> {
-        prev_cursor(self, &path.into().verbs)
-    }
-
-    /// Returns the `PathEvent` at the current cursor position in the path.
-    pub fn event<'l, P>(&self, path: P) -> PathEvent
-    where P : Into<PathSlice<'l>> {
-        let path = path.into();
-        event_at_cursor(self, &path.points, &path.verbs)
-    }
-}
-
-pub fn reverse_path(path: PathSlice, builder: &mut dyn PathBuilder) {
-    let points = &path.points[..];
-    // At each iteration, p points to the first point after the current verb.
-    let mut p = points.len();
-    let mut need_close = false;
-    let mut need_moveto = true;
-
-    let mut n = 0;
-
-    for v in path.verbs.iter().rev().cloned() {
-        n += 1;
-        match v {
-            Verb::LineTo
-            | Verb::QuadraticTo
-            | Verb::CubicTo => {
-                if need_moveto {
-                    need_moveto = false;
-                    builder.move_to(points[p - 1]);
-                }
-            }
-            _ => {}
-        }
-
-        match v {
-            Verb::Close => {
-                need_close = true;
-                builder.move_to(points[p - 1]);
-                need_moveto = false;
-            }
-            Verb::MoveTo => {
-                if need_close {
-                    need_close = false;
-                    builder.close();
-                }
-                need_moveto = true;
-            }
-            Verb::LineTo => {
-                builder.line_to(points[p - 2]);
-            }
-            Verb::QuadraticTo => {
-                builder.quadratic_bezier_to(points[p - 2], points[p - 3]);
-            }
-            Verb::CubicTo => {
-                builder.cubic_bezier_to(points[p - 2], points[p - 3], points[p - 4]);
-            }
-        }
-        p -= n_stored_points(v) as usize;
-    }
-
-    // This is a special case that the logic above misses: The path only contains
-    // a single MoveTo event.
-    if n == 1 && need_moveto {
-        builder.move_to(points[p]);
-    }
-}
-
-#[test]
-fn test_reverse_path() {
-    let mut builder = Path::builder();
-    builder.move_to(point(0.0, 0.0));
-    builder.line_to(point(1.0, 0.0));
-    builder.line_to(point(1.0, 1.0));
-    builder.line_to(point(0.0, 1.0));
-
-    builder.move_to(point(10.0, 0.0));
-    builder.line_to(point(11.0, 0.0));
-    builder.line_to(point(11.0, 1.0));
-    builder.line_to(point(10.0, 1.0));
-    builder.close();
-
-    builder.move_to(point(20.0, 0.0));
-    builder.quadratic_bezier_to(point(21.0, 0.0), point(21.0, 1.0));
-
-    let p1 = builder.build();
-    let mut builder = Path::builder();
-    reverse_path(p1.as_slice(), &mut builder);
-    let p2 = builder.build();
-
-    let mut it = p2.iter();
-
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(21.0, 1.0))));
-    assert_eq!(it.next(), Some(PathEvent::Quadratic(QuadraticBezierSegment {
-        from: point(21.0, 1.0),
-        ctrl: point(21.0, 0.0),
-        to: point(20.0, 0.0),
-    })));
-
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(10.0, 1.0))));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(10.0, 1.0), to: point(11.0, 1.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(11.0, 1.0), to: point(11.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(11.0, 0.0), to: point(10.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Close(LineSegment { from: point(10.0, 0.0), to: point(10.0, 1.0) })));
-
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(0.0, 1.0))));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(0.0, 1.0), to: point(1.0, 1.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(1.0, 1.0), to: point(1.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(1.0, 0.0), to: point(0.0, 0.0) })));
-
-    assert_eq!(it.next(), None);
-}
-
-#[test]
-fn test_reverse_path_no_close() {
-    let mut builder = Path::builder();
-    builder.move_to(point(0.0, 0.0));
-    builder.line_to(point(1.0, 0.0));
-    builder.line_to(point(1.0, 1.0));
-
-    let p1 = builder.build();
-
-    let mut builder = Path::builder();
-    reverse_path(p1.as_slice(), &mut builder);
-    let p2 = builder.build();
-
-    let mut it = p2.iter();
-
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(1.0, 1.0))));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(1.0, 1.0), to: point(1.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(1.0, 0.0), to: point(0.0, 0.0) })));
-    assert_eq!(it.next(), None);
-}
-
-#[test]
-fn test_reverse_empty_path() {
-    let p1 = Path::builder().build();
-    let mut builder = Path::builder();
-    reverse_path(p1.as_slice(), &mut builder);
-    let p2 = builder.build();
-    assert_eq!(p2.iter().next(), None);
-}
-
-#[test]
-fn test_reverse_single_moveto() {
-    let mut builder = Path::builder();
-    builder.move_to(point(0.0, 0.0));
-    let p1 = builder.build();
-    let mut builder = Path::builder();
-    reverse_path(p1.as_slice(), &mut builder);
-    let p2 = builder.build();
-    let mut it = p2.iter();
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(0.0, 0.0))));
-    assert_eq!(it.next(), None);
-}
-
 
 #[inline]
 fn nan_check(p: Point) {
@@ -498,307 +665,932 @@ fn nan_check(p: Point) {
     debug_assert!(p.y.is_finite());
 }
 
-impl Build for Builder {
-    type PathType = Path;
-
-    fn build(self) -> Path { self.build() }
-
-    fn build_and_reset(&mut self) -> Path {
-        self.current_position = Point::new(0.0, 0.0);
-        self.first_position = Point::new(0.0, 0.0);
-
-        Path {
-            points: mem::replace(&mut self.points, Vec::new()).into_boxed_slice(),
-            verbs: mem::replace(&mut self.verbs, Vec::new()).into_boxed_slice(),
-        }
-    }
-}
-
-impl FlatPathBuilder for Builder {
-    fn move_to(&mut self, to: Point) {
-        self.move_to(to);
-    }
-
-    fn line_to(&mut self, to: Point) {
-        self.line_to(to);
-    }
-
-    fn close(&mut self) {
-        self.close();
-    }
-
-    fn current_position(&self) -> Point { self.current_position }
-}
-
-impl PolygonBuilder for Builder {
-    fn polygon(&mut self, points: &[Point]) {
-        self.polygon(points);
-    }
-}
-
-impl<'l> ops::Index<VertexId> for PathSlice<'l> {
-    type Output = Point;
-    fn index(&self, id: VertexId) -> &Point {
-        &self.points[id.offset() as usize]
-    }
-}
-
-impl ops::Index<VertexId> for Path {
-    type Output = Point;
-    fn index(&self, id: VertexId) -> &Point {
-        &self.points[id.offset() as usize]
-    }
-}
-
-impl ops::IndexMut<VertexId> for Path {
-    fn index_mut(&mut self, id: VertexId) -> &mut Point {
-        &mut self.points[id.offset() as usize]
-    }
-}
-
-impl PathBuilder for Builder {
-    fn quadratic_bezier_to(&mut self, ctrl: Point, to: Point) {
-        self.quadratic_bezier_to(ctrl, to);
-    }
-
-    fn cubic_bezier_to(&mut self, ctrl1: Point, ctrl2: Point, to: Point) {
-        self.cubic_bezier_to(ctrl1, ctrl2, to);
-    }
-
-    fn arc(
-        &mut self,
-        center: Point,
-        radii: Vector,
-        sweep_angle: Angle,
-        x_rotation: Angle
-    ) {
-        self.arc(center, radii, sweep_angle, x_rotation);
-    }
-}
-
 /// An iterator for `Path` and `PathSlice`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Iter<'l> {
-    points: ::std::slice::Iter<'l, Point>,
+    points: PointIter<'l>,
     verbs: ::std::slice::Iter<'l, Verb>,
     current: Point,
     first: Point,
+    num_attributes: usize,
+    // Number of slots in the points array occupied by the custom attributes.
+    attrib_stride: usize,
 }
 
 impl<'l> Iter<'l> {
-    fn new(points: &'l [Point], verbs: &'l [Verb]) -> Self {
+    fn new(num_attributes: usize, points: &'l [Point], verbs: &'l [Verb]) -> Self {
         Iter {
-            points: points.iter(),
+            points: PointIter::new(points),
             verbs: verbs.iter(),
             current: point(0.0, 0.0),
             first: point(0.0, 0.0),
+            num_attributes,
+            attrib_stride: (num_attributes + 1) / 2,
         }
+    }
+
+    #[inline]
+    fn skip_attributes(&mut self) {
+        self.points.advance_n(self.attrib_stride);
     }
 }
 
 impl<'l> Iterator for Iter<'l> {
     type Item = PathEvent;
+    #[inline]
     fn next(&mut self) -> Option<PathEvent> {
         match self.verbs.next() {
-            Some(&Verb::MoveTo) => {
-                self.current = *self.points.next().unwrap();
+            Some(&Verb::Begin) => {
+                self.current = self.points.next();
+                self.skip_attributes();
                 self.first = self.current;
-                Some(PathEvent::MoveTo(self.current))
+                Some(PathEvent::Begin { at: self.current })
             }
             Some(&Verb::LineTo) => {
                 let from = self.current;
-                self.current = *self.points.next().unwrap();
-                Some(PathEvent::Line(LineSegment {
-                    from, to: self.current
-                }))
+                self.current = self.points.next();
+                self.skip_attributes();
+                Some(PathEvent::Line {
+                    from,
+                    to: self.current,
+                })
             }
             Some(&Verb::QuadraticTo) => {
                 let from = self.current;
-                let ctrl = *self.points.next().unwrap();
-                self.current = *self.points.next().unwrap();
-                Some(PathEvent::Quadratic(QuadraticBezierSegment {
-                    from, ctrl, to: self.current
-                }))
+                let ctrl = self.points.next();
+                self.current = self.points.next();
+                self.skip_attributes();
+                Some(PathEvent::Quadratic {
+                    from,
+                    ctrl,
+                    to: self.current,
+                })
             }
             Some(&Verb::CubicTo) => {
                 let from = self.current;
-                let ctrl1 = *self.points.next().unwrap();
-                let ctrl2 = *self.points.next().unwrap();
-                self.current = *self.points.next().unwrap();
-                Some(PathEvent::Cubic(CubicBezierSegment {
-                    from, ctrl1, ctrl2, to: self.current
-                }))
+                let ctrl1 = self.points.next();
+                let ctrl2 = self.points.next();
+                self.current = self.points.next();
+                self.skip_attributes();
+                Some(PathEvent::Cubic {
+                    from,
+                    ctrl1,
+                    ctrl2,
+                    to: self.current,
+                })
             }
             Some(&Verb::Close) => {
-                let from = self.current;
+                let last = self.current;
                 self.current = self.first;
-                Some(PathEvent::Close(LineSegment {
-                    from,
-                    to: self.first,
-                }))
+                Some(PathEvent::End {
+                    last,
+                    first: self.first,
+                    close: true,
+                })
+            }
+            Some(&Verb::End) => {
+                let last = self.current;
+                self.current = self.first;
+                Some(PathEvent::End {
+                    last,
+                    first: self.first,
+                    close: false,
+                })
             }
             None => None,
         }
     }
 }
 
-fn n_stored_points(verb: Verb) -> u32 {
-    match verb {
-        Verb::MoveTo => 1,
-        Verb::LineTo => 1,
-        Verb::QuadraticTo => 2,
-        Verb::CubicTo => 3,
-        Verb::Close => 0,
-    }
+/// Manually implemented to avoid iterator overhead when skipping over
+/// several points where the custom attributes are stored.
+///
+/// It makes an unfortunately large difference (the simple iterator
+/// benchmarks are 2 to 3 times faster).
+#[derive(Copy, Clone)]
+struct PointIter<'l> {
+    ptr: *const Point,
+    end: *const Point,
+    _marker: std::marker::PhantomData<&'l Point>,
 }
 
-fn next_cursor(cursor: &mut Cursor, verbs: &[Verb]) -> bool {
-    if cursor.verb as usize >= verbs.len() - 1 {
-        return false;
+impl<'l> PointIter<'l> {
+    fn new(slice: &[Point]) -> Self {
+        let ptr = slice.as_ptr();
+        let end = unsafe { ptr.offset(slice.len() as isize) };
+        PointIter {
+            ptr,
+            end,
+            _marker: std::marker::PhantomData,
+        }
     }
 
-    let verb = verbs[cursor.verb as usize + 1];
-    if verb == Verb::MoveTo {
-        cursor.first_vertex = cursor.vertex;
-        cursor.first_verb = cursor.verb;
-    }
-
-    cursor.vertex = cursor.vertex + n_stored_points(verb);
-    cursor.verb += 1;
-
-    true
-}
-
-fn prev_cursor(cursor: &mut Cursor, verbs: &[Verb]) -> bool {
-    if cursor.verb == 0 {
-        return false;
-    }
-
-    if verbs[cursor.verb as usize] == Verb::MoveTo {
-        let mut v = cursor.verb as usize;
-        let mut p = cursor.vertex.0;
-        while p > 0 {
-            v -= 1;
-            p -= n_stored_points(verbs[v]);
-            if verbs[v] == Verb::MoveTo {
-                break;
-            }
+    #[inline]
+    fn next(&mut self) -> Point {
+        // Don't bother panicking here. calls to next
+        // are always followed by advance_n which will
+        // catch the issue and panic.
+        if self.ptr >= self.end {
+            return point(std::f32::NAN, std::f32::NAN);
         }
 
-        cursor.first_vertex = VertexId(p);
-        cursor.first_verb = v as u32;
+        unsafe {
+            let output = *self.ptr;
+            self.ptr = self.ptr.offset(1);
+
+            return output;
+        }
     }
 
-    cursor.vertex = cursor.vertex - n_stored_points(verbs[cursor.verb as usize - 1]);
-    cursor.verb = cursor.verb - 1;
-
-    true
+    #[inline]
+    fn advance_n(&mut self, n: usize) {
+        unsafe {
+            self.ptr = self.ptr.offset(n as isize);
+            assert!(self.ptr <= self.end)
+        }
+    }
 }
 
-fn event_at_cursor(cursor: &Cursor, points: &[Point], verbs: &[Verb]) -> PathEvent {
-    let p = cursor.vertex.to_usize();
-    match verbs[cursor.verb as usize] {
-        Verb::MoveTo => PathEvent::MoveTo(points[p]),
-        Verb::LineTo => PathEvent::Line(LineSegment {
-            from: points[p - 1],
-            to: points[p],
-        }),
-        Verb::QuadraticTo => PathEvent::Quadratic(QuadraticBezierSegment {
-            from: points[p - 1],
-            ctrl: points[p],
-            to: points[p + 1],
-        }),
-        Verb::CubicTo => PathEvent::Cubic(CubicBezierSegment {
-            from: points[p - 1],
-            ctrl1: points[p],
-            ctrl2: points[p + 1],
-            to: points[p + 2],
-        }),
-        Verb::Close => PathEvent::Close(LineSegment {
-            from: points[p - 1],
-            to: points[cursor.first_vertex.to_usize()],
-        }),
+/// An iterator for `Path` and `PathSlice`.
+#[derive(Clone)]
+pub struct IterWithAttributes<'l> {
+    points: PointIter<'l>,
+    verbs: ::std::slice::Iter<'l, Verb>,
+    current: (Point, &'l [f32]),
+    first: (Point, &'l [f32]),
+    num_attributes: usize,
+    attrib_stride: usize,
+}
+
+impl<'l> IterWithAttributes<'l> {
+    fn new(num_attributes: usize, points: &'l [Point], verbs: &'l [Verb]) -> Self {
+        IterWithAttributes {
+            points: PointIter::new(points),
+            verbs: verbs.iter(),
+            current: (point(0.0, 0.0), &[]),
+            first: (point(0.0, 0.0), &[]),
+            num_attributes,
+            attrib_stride: (num_attributes + 1) / 2,
+        }
+    }
+
+    pub fn points(self) -> Iter<'l> {
+        Iter {
+            points: self.points,
+            verbs: self.verbs,
+            current: self.current.0,
+            first: self.first.0,
+            num_attributes: self.num_attributes,
+            attrib_stride: self.attrib_stride,
+        }
+    }
+
+    #[inline]
+    fn pop_endpoint(&mut self) -> (Point, &'l [f32]) {
+        let position = self.points.next();
+        let attributes = unsafe {
+            let ptr = &(*self.points.ptr).x as *const f32;
+            std::slice::from_raw_parts(ptr, self.num_attributes)
+        };
+
+        self.points.advance_n(self.attrib_stride);
+
+        (position, attributes)
+    }
+}
+
+impl<'l> Iterator for IterWithAttributes<'l> {
+    type Item = Event<(Point, &'l [f32]), Point>;
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.verbs.next() {
+            Some(&Verb::Begin) => {
+                self.current = self.pop_endpoint();
+                self.first = self.current;
+                Some(Event::Begin { at: self.current })
+            }
+            Some(&Verb::LineTo) => {
+                let from = self.current;
+                self.current = self.pop_endpoint();
+                Some(Event::Line {
+                    from,
+                    to: self.current,
+                })
+            }
+            Some(&Verb::QuadraticTo) => {
+                let from = self.current;
+                let ctrl = self.points.next();
+                self.current = self.pop_endpoint();
+                Some(Event::Quadratic {
+                    from,
+                    ctrl,
+                    to: self.current,
+                })
+            }
+            Some(&Verb::CubicTo) => {
+                let from = self.current;
+                let ctrl1 = self.points.next();
+                let ctrl2 = self.points.next();
+                self.current = self.pop_endpoint();
+                Some(Event::Cubic {
+                    from,
+                    ctrl1,
+                    ctrl2,
+                    to: self.current,
+                })
+            }
+            Some(&Verb::Close) => {
+                let last = self.current;
+                self.current = self.first;
+                Some(Event::End {
+                    last,
+                    first: self.first,
+                    close: true,
+                })
+            }
+            Some(&Verb::End) => {
+                let last = self.current;
+                self.current = self.first;
+                Some(Event::End {
+                    last,
+                    first: self.first,
+                    close: false,
+                })
+            }
+            None => None,
+        }
+    }
+}
+
+/// An iterator of endpoint and control point ids for `Path` and `PathSlice`.
+#[derive(Clone, Debug)]
+pub struct IdIter<'l> {
+    verbs: ::std::slice::Iter<'l, Verb>,
+    current: u32,
+    first: u32,
+    evt: u32,
+    endpoint_stride: u32,
+}
+
+impl<'l> IdIter<'l> {
+    fn new(num_attributes: usize, verbs: &'l [Verb]) -> Self {
+        IdIter {
+            verbs: verbs.iter(),
+            current: 0,
+            first: 0,
+            evt: 0,
+            endpoint_stride: (num_attributes as u32 + 1) / 2 + 1,
+        }
+    }
+}
+
+impl<'l> Iterator for IdIter<'l> {
+    type Item = IdEvent;
+    #[inline]
+    fn next(&mut self) -> Option<IdEvent> {
+        match self.verbs.next() {
+            Some(&Verb::Begin) => {
+                let at = self.current;
+                self.first = at;
+                Some(IdEvent::Begin { at: EndpointId(at) })
+            }
+            Some(&Verb::LineTo) => {
+                let from = EndpointId(self.current);
+                self.current += self.endpoint_stride;
+                let to = EndpointId(self.current);
+                self.evt += 1;
+                Some(IdEvent::Line { from, to })
+            }
+            Some(&Verb::QuadraticTo) => {
+                let from = EndpointId(self.current);
+                let base = self.current + self.endpoint_stride;
+                let ctrl = ControlPointId(base);
+                let to = EndpointId(base + 1);
+                self.current = base + 1;
+                self.evt += 1;
+                Some(IdEvent::Quadratic { from, ctrl, to })
+            }
+            Some(&Verb::CubicTo) => {
+                let from = EndpointId(self.current);
+                let base = self.current + self.endpoint_stride;
+                let ctrl1 = ControlPointId(base);
+                let ctrl2 = ControlPointId(base + 1);
+                let to = EndpointId(base + 2);
+                self.current = base + 2;
+                self.evt += 1;
+                Some(IdEvent::Cubic {
+                    from,
+                    ctrl1,
+                    ctrl2,
+                    to,
+                })
+            }
+            Some(&Verb::Close) => {
+                let last = EndpointId(self.current);
+                let first = EndpointId(self.first);
+                self.current += self.endpoint_stride;
+                self.evt += 1;
+                Some(IdEvent::End {
+                    last,
+                    first,
+                    close: true,
+                })
+            }
+            Some(&Verb::End) => {
+                let last = EndpointId(self.current);
+                let first = EndpointId(self.first);
+                self.current += self.endpoint_stride;
+                self.evt += 1;
+                Some(IdEvent::End {
+                    last,
+                    first,
+                    close: false,
+                })
+            }
+            None => None,
+        }
+    }
+}
+
+#[inline]
+fn interpolated_attributes(
+    num_attributes: usize,
+    points: &[Point],
+    endpoint: EndpointId,
+) -> &[f32] {
+    if num_attributes == 0 {
+        return &[];
+    }
+
+    let idx = endpoint.0 as usize + 1;
+    assert!(idx + (num_attributes + 1) / 2 <= points.len());
+
+    unsafe {
+        let ptr = &points[idx].x as *const f32;
+        std::slice::from_raw_parts(ptr, num_attributes)
+    }
+}
+
+fn concatenate_paths(
+    points: &mut Vec<Point>,
+    verbs: &mut Vec<Verb>,
+    paths: &[PathSlice],
+    num_attributes: usize,
+) {
+    let mut np = 0;
+    let mut nv = 0;
+
+    for path in paths {
+        assert_eq!(path.num_attributes(), num_attributes);
+        np += path.points.len();
+        nv += path.verbs.len();
+    }
+
+    verbs.reserve(nv);
+    points.reserve(np);
+
+    for path in paths {
+        verbs.extend_from_slice(&path.verbs);
+        points.extend_from_slice(&path.points);
+    }
+}
+
+fn reverse_path(path: PathSlice) -> Path {
+    let mut builder = Path::builder_with_attributes(path.num_attributes());
+
+    let attrib_stride = (path.num_attributes() + 1) / 2;
+    let points = &path.points[..];
+    // At each iteration, p points to the first point after the current verb.
+    let mut p = points.len();
+    let mut need_close = false;
+
+    for v in path.verbs.iter().rev().cloned() {
+        match v {
+            Verb::Close => {
+                let idx = p - 1 - attrib_stride;
+                need_close = true;
+                builder.begin(points[idx], path.attributes(EndpointId(idx as u32)));
+            }
+            Verb::End => {
+                let idx = p - 1 - attrib_stride;
+                need_close = false;
+                builder.begin(points[idx], path.attributes(EndpointId(idx as u32)));
+            }
+            Verb::Begin => {
+                builder.end(need_close);
+                need_close = false;
+            }
+            Verb::LineTo => {
+                let idx = p - 2 - attrib_stride * 2;
+                builder.line_to(points[idx], path.attributes(EndpointId(idx as u32)));
+            }
+            Verb::QuadraticTo => {
+                let ctrl_idx = p - attrib_stride - 2;
+                let to_idx = ctrl_idx - attrib_stride - 1;
+                builder.quadratic_bezier_to(
+                    points[ctrl_idx],
+                    points[to_idx],
+                    path.attributes(EndpointId(to_idx as u32)),
+                );
+            }
+            Verb::CubicTo => {
+                let ctrl1_idx = p - attrib_stride - 2;
+                let ctrl2_idx = ctrl1_idx - 1;
+                let to_idx = ctrl2_idx - attrib_stride - 1;
+                builder.cubic_bezier_to(
+                    points[ctrl1_idx],
+                    points[ctrl2_idx],
+                    points[to_idx],
+                    path.attributes(EndpointId(to_idx as u32)),
+                );
+            }
+        }
+        p -= n_stored_points(v, attrib_stride);
+    }
+
+    builder.build()
+}
+
+fn n_stored_points(verb: Verb, attrib_stride: usize) -> usize {
+    match verb {
+        Verb::Begin => attrib_stride + 1,
+        Verb::LineTo => attrib_stride + 1,
+        Verb::QuadraticTo => attrib_stride + 2,
+        Verb::CubicTo => attrib_stride + 3,
+        Verb::Close => 0,
+        Verb::End => 0,
     }
 }
 
 #[test]
+fn test_reverse_path_simple() {
+    let mut builder = Path::builder_with_attributes(1);
+    builder.begin(point(0.0, 0.0), &[1.0]);
+    builder.line_to(point(1.0, 0.0), &[2.0]);
+    builder.line_to(point(1.0, 1.0), &[3.0]);
+    builder.line_to(point(0.0, 1.0), &[4.0]);
+    builder.end(false);
+
+    let p1 = builder.build();
+    let p2 = p1.reversed();
+
+    let mut it = p2.iter_with_attributes();
+
+    // Using a function that explicits the argument types works around type inference issue.
+    fn check<'l>(
+        a: Option<Event<(Point, &'l [f32]), Point>>,
+        b: Option<Event<(Point, &'l [f32]), Point>>,
+    ) -> bool {
+        if a != b {
+            println!("left: {:?}", a);
+            println!("right: {:?}", b);
+        }
+
+        a == b
+    }
+
+    assert!(check(
+        it.next(),
+        Some(Event::Begin {
+            at: (point(0.0, 1.0), &[4.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::Line {
+            from: (point(0.0, 1.0), &[4.0]),
+            to: (point(1.0, 1.0), &[3.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::Line {
+            from: (point(1.0, 1.0), &[3.0]),
+            to: (point(1.0, 0.0), &[2.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::Line {
+            from: (point(1.0, 0.0), &[2.0]),
+            to: (point(0.0, 0.0), &[1.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::End {
+            last: (point(0.0, 0.0), &[1.0]),
+            first: (point(0.0, 1.0), &[4.0]),
+            close: false
+        })
+    ));
+
+    assert!(check(it.next(), None));
+}
+
+#[test]
+fn test_reverse_path() {
+    let mut builder = Path::builder_with_attributes(1);
+    builder.begin(point(0.0, 0.0), &[1.0]);
+    builder.line_to(point(1.0, 0.0), &[2.0]);
+    builder.line_to(point(1.0, 1.0), &[3.0]);
+    builder.line_to(point(0.0, 1.0), &[4.0]);
+    builder.end(false);
+
+    builder.begin(point(10.0, 0.0), &[5.0]);
+    builder.line_to(point(11.0, 0.0), &[6.0]);
+    builder.line_to(point(11.0, 1.0), &[7.0]);
+    builder.line_to(point(10.0, 1.0), &[8.0]);
+    builder.end(true);
+
+    builder.begin(point(20.0, 0.0), &[9.0]);
+    builder.quadratic_bezier_to(point(21.0, 0.0), point(21.0, 1.0), &[10.0]);
+    builder.end(false);
+
+    let p1 = builder.build();
+    let p2 = p1.reversed();
+
+    let mut it = p2.iter_with_attributes();
+
+    // Using a function that explicits the argument types works around type inference issue.
+    fn check<'l>(
+        a: Option<Event<(Point, &'l [f32]), Point>>,
+        b: Option<Event<(Point, &'l [f32]), Point>>,
+    ) -> bool {
+        if a != b {
+            println!("left: {:?}", a);
+            println!("right: {:?}", b);
+        }
+
+        a == b
+    }
+
+    assert!(check(
+        it.next(),
+        Some(Event::Begin {
+            at: (point(21.0, 1.0), &[10.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::Quadratic {
+            from: (point(21.0, 1.0), &[10.0]),
+            ctrl: point(21.0, 0.0),
+            to: (point(20.0, 0.0), &[9.0]),
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::End {
+            last: (point(20.0, 0.0), &[9.0]),
+            first: (point(21.0, 1.0), &[10.0]),
+            close: false
+        })
+    ));
+
+    assert!(check(
+        it.next(),
+        Some(Event::Begin {
+            at: (point(10.0, 1.0), &[8.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::Line {
+            from: (point(10.0, 1.0), &[8.0]),
+            to: (point(11.0, 1.0), &[7.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::Line {
+            from: (point(11.0, 1.0), &[7.0]),
+            to: (point(11.0, 0.0), &[6.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::Line {
+            from: (point(11.0, 0.0), &[6.0]),
+            to: (point(10.0, 0.0), &[5.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::End {
+            last: (point(10.0, 0.0), &[5.0]),
+            first: (point(10.0, 1.0), &[8.0]),
+            close: true
+        })
+    ));
+
+    assert!(check(
+        it.next(),
+        Some(Event::Begin {
+            at: (point(0.0, 1.0), &[4.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::Line {
+            from: (point(0.0, 1.0), &[4.0]),
+            to: (point(1.0, 1.0), &[3.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::Line {
+            from: (point(1.0, 1.0), &[3.0]),
+            to: (point(1.0, 0.0), &[2.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::Line {
+            from: (point(1.0, 0.0), &[2.0]),
+            to: (point(0.0, 0.0), &[1.0])
+        })
+    ));
+    assert!(check(
+        it.next(),
+        Some(Event::End {
+            last: (point(0.0, 0.0), &[1.0]),
+            first: (point(0.0, 1.0), &[4.0]),
+            close: false
+        })
+    ));
+
+    assert!(check(it.next(), None));
+}
+
+#[test]
+fn test_reverse_path_no_close() {
+    let mut builder = Path::builder();
+    builder.begin(point(0.0, 0.0));
+    builder.line_to(point(1.0, 0.0));
+    builder.line_to(point(1.0, 1.0));
+    builder.end(false);
+
+    let p1 = builder.build();
+
+    let p2 = p1.reversed();
+
+    let mut it = p2.iter();
+
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Begin {
+            at: point(1.0, 1.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Line {
+            from: point(1.0, 1.0),
+            to: point(1.0, 0.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Line {
+            from: point(1.0, 0.0),
+            to: point(0.0, 0.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::End {
+            last: point(0.0, 0.0),
+            first: point(1.0, 1.0),
+            close: false
+        })
+    );
+    assert_eq!(it.next(), None);
+}
+
+#[test]
+fn test_reverse_empty_path() {
+    let p1 = Path::builder().build();
+    let p2 = p1.reversed();
+    assert_eq!(p2.iter().next(), None);
+}
+
+#[test]
+fn test_reverse_single_point() {
+    let mut builder = Path::builder();
+    builder.begin(point(0.0, 0.0));
+    builder.end(false);
+
+    let p1 = builder.build();
+    let p2 = p1.reversed();
+    let mut it = p2.iter();
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Begin {
+            at: point(0.0, 0.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::End {
+            last: point(0.0, 0.0),
+            first: point(0.0, 0.0),
+            close: false
+        })
+    );
+    assert_eq!(it.next(), None);
+}
+
+#[test]
 fn test_path_builder_1() {
+    let mut p = BuilderWithAttributes::new(1);
+    p.begin(point(0.0, 0.0), &[0.0]);
+    p.line_to(point(1.0, 0.0), &[1.0]);
+    p.line_to(point(2.0, 0.0), &[2.0]);
+    p.line_to(point(3.0, 0.0), &[3.0]);
+    p.quadratic_bezier_to(point(4.0, 0.0), point(4.0, 1.0), &[4.0]);
+    p.cubic_bezier_to(point(5.0, 0.0), point(5.0, 1.0), point(5.0, 2.0), &[5.0]);
+    p.end(true);
 
-    let mut p = Builder::with_capacity(0);
-    p.line_to(point(1.0, 0.0));
-    p.line_to(point(2.0, 0.0));
-    p.line_to(point(3.0, 0.0));
-    p.quadratic_bezier_to(point(4.0, 0.0), point(4.0, 1.0));
-    p.cubic_bezier_to(point(5.0, 0.0), point(5.0, 1.0), point(5.0, 2.0));
-    p.close();
+    p.begin(point(10.0, 0.0), &[6.0]);
+    p.line_to(point(11.0, 0.0), &[7.0]);
+    p.line_to(point(12.0, 0.0), &[8.0]);
+    p.line_to(point(13.0, 0.0), &[9.0]);
+    p.quadratic_bezier_to(point(14.0, 0.0), point(14.0, 1.0), &[10.0]);
+    p.cubic_bezier_to(
+        point(15.0, 0.0),
+        point(15.0, 1.0),
+        point(15.0, 2.0),
+        &[11.0],
+    );
+    p.end(true);
 
-    p.move_to(point(10.0, 0.0));
-    p.line_to(point(11.0, 0.0));
-    p.line_to(point(12.0, 0.0));
-    p.line_to(point(13.0, 0.0));
-    p.quadratic_bezier_to(point(14.0, 0.0), point(14.0, 1.0));
-    p.cubic_bezier_to(point(15.0, 0.0), point(15.0, 1.0), point(15.0, 2.0));
-    p.close();
-
-    p.close();
-    p.move_to(point(1.0, 1.0));
-    p.move_to(point(2.0, 2.0));
-    p.move_to(point(3.0, 3.0));
-    p.line_to(point(4.0, 4.0));
+    p.begin(point(1.0, 1.0), &[12.0]);
+    p.end(false);
+    p.begin(point(2.0, 2.0), &[13.0]);
+    p.end(false);
+    p.begin(point(3.0, 3.0), &[14.0]);
+    p.line_to(point(4.0, 4.0), &[15.0]);
+    p.end(false);
 
     let path = p.build();
 
-    let mut it = path.iter();
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(0.0, 0.0))));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(0.0, 0.0), to: point(1.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(1.0, 0.0), to: point(2.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(2.0, 0.0), to: point(3.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Quadratic(QuadraticBezierSegment {
-        from: point(3.0, 0.0),
-        ctrl: point(4.0, 0.0),
-        to: point(4.0, 1.0)
-    })));
+    let mut it = path.iter_with_attributes();
     assert_eq!(
         it.next(),
-        Some(PathEvent::Cubic(CubicBezierSegment {
-            from: point(4.0, 1.0),
+        Some(Event::Begin {
+            at: (point(0.0, 0.0), &[0.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Line {
+            from: (point(0.0, 0.0), &[0.0][..]),
+            to: (point(1.0, 0.0), &[1.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Line {
+            from: (point(1.0, 0.0), &[1.0][..]),
+            to: (point(2.0, 0.0), &[2.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Line {
+            from: (point(2.0, 0.0), &[2.0][..]),
+            to: (point(3.0, 0.0), &[3.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Quadratic {
+            from: (point(3.0, 0.0), &[3.0][..]),
+            ctrl: point(4.0, 0.0),
+            to: (point(4.0, 1.0), &[4.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Cubic {
+            from: (point(4.0, 1.0), &[4.0][..]),
             ctrl1: point(5.0, 0.0),
             ctrl2: point(5.0, 1.0),
-            to: point(5.0, 2.0)
-        }))
+            to: (point(5.0, 2.0), &[5.0][..]),
+        })
     );
-    assert_eq!(it.next(), Some(PathEvent::Close(LineSegment { from: point(5.0, 2.0), to: point(0.0, 0.0) })));
-
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(10.0, 0.0))));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(10.0, 0.0), to: point(11.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(11.0, 0.0), to: point(12.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(12.0, 0.0), to: point(13.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Quadratic(QuadraticBezierSegment {
-        from: point(13.0, 0.0),
-        ctrl: point(14.0, 0.0),
-        to: point(14.0, 1.0),
-    })));
     assert_eq!(
         it.next(),
-        Some(PathEvent::Cubic(CubicBezierSegment {
-            from: point(14.0, 1.0),
+        Some(Event::End {
+            last: (point(5.0, 2.0), &[5.0][..]),
+            first: (point(0.0, 0.0), &[0.0][..]),
+            close: true
+        })
+    );
+
+    assert_eq!(
+        it.next(),
+        Some(Event::Begin {
+            at: (point(10.0, 0.0), &[6.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Line {
+            from: (point(10.0, 0.0), &[6.0][..]),
+            to: (point(11.0, 0.0), &[7.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Line {
+            from: (point(11.0, 0.0), &[7.0][..]),
+            to: (point(12.0, 0.0), &[8.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Line {
+            from: (point(12.0, 0.0), &[8.0][..]),
+            to: (point(13.0, 0.0), &[9.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Quadratic {
+            from: (point(13.0, 0.0), &[9.0][..]),
+            ctrl: point(14.0, 0.0),
+            to: (point(14.0, 1.0), &[10.0][..]),
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Cubic {
+            from: (point(14.0, 1.0), &[10.0][..]),
             ctrl1: point(15.0, 0.0),
             ctrl2: point(15.0, 1.0),
-            to: point(15.0, 2.0),
-        }))
+            to: (point(15.0, 2.0), &[11.0][..]),
+        })
     );
-    assert_eq!(it.next(), Some(PathEvent::Close(LineSegment { from: point(15.0, 2.0), to: point(10.0, 0.0) })));
+    assert_eq!(
+        it.next(),
+        Some(Event::End {
+            last: (point(15.0, 2.0), &[11.0][..]),
+            first: (point(10.0, 0.0), &[6.0][..]),
+            close: true
+        })
+    );
 
-    // Not clear that this is the most useful behavior.
-    // Closing when there is no path should probably be dropped.
-    assert_eq!(it.next(), Some(PathEvent::Close(LineSegment { from: point(10.0, 0.0), to: point(10.0, 0.0) })));
-
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(1.0, 1.0))));
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(2.0, 2.0))));
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(3.0, 3.0))));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment {
-        from: point(3.0, 3.0), to: point(4.0, 4.0),
-    })));
+    assert_eq!(
+        it.next(),
+        Some(Event::Begin {
+            at: (point(1.0, 1.0), &[12.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::End {
+            last: (point(1.0, 1.0), &[12.0][..]),
+            first: (point(1.0, 1.0), &[12.0][..]),
+            close: false
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Begin {
+            at: (point(2.0, 2.0), &[13.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::End {
+            last: (point(2.0, 2.0), &[13.0][..]),
+            first: (point(2.0, 2.0), &[13.0][..]),
+            close: false
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Begin {
+            at: (point(3.0, 3.0), &[14.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::Line {
+            from: (point(3.0, 3.0), &[14.0][..]),
+            to: (point(4.0, 4.0), &[15.0][..])
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(Event::End {
+            last: (point(4.0, 4.0), &[15.0][..]),
+            first: (point(3.0, 3.0), &[14.0][..]),
+            close: false
+        })
+    );
     assert_eq!(it.next(), None);
     assert_eq!(it.next(), None);
     assert_eq!(it.next(), None);
@@ -806,165 +1598,199 @@ fn test_path_builder_1() {
 
 #[test]
 fn test_path_builder_empty() {
-    let path = Path::builder().build();
+    let path = Path::builder_with_attributes(5).build();
     let mut it = path.iter();
     assert_eq!(it.next(), None);
     assert_eq!(it.next(), None);
 }
 
 #[test]
-fn test_path_builder_empty_move_to() {
-    let mut p = Path::builder();
-    p.move_to(point(1.0, 2.0));
-    p.move_to(point(3.0, 4.0));
-    p.move_to(point(5.0, 6.0));
+fn test_path_builder_empty_begin() {
+    let mut p = Path::builder_with_attributes(1);
+    p.begin(point(1.0, 2.0), &[0.0]);
+    p.end(false);
+    p.begin(point(3.0, 4.0), &[1.0]);
+    p.end(false);
+    p.begin(point(5.0, 6.0), &[2.0]);
+    p.end(false);
 
     let path = p.build();
     let mut it = path.iter();
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(1.0, 2.0))));
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(3.0, 4.0))));
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(5.0, 6.0))));
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Begin {
+            at: point(1.0, 2.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::End {
+            last: point(1.0, 2.0),
+            first: point(1.0, 2.0),
+            close: false,
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Begin {
+            at: point(3.0, 4.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::End {
+            last: point(3.0, 4.0),
+            first: point(3.0, 4.0),
+            close: false,
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Begin {
+            at: point(5.0, 6.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::End {
+            last: point(5.0, 6.0),
+            first: point(5.0, 6.0),
+            close: false,
+        })
+    );
     assert_eq!(it.next(), None);
     assert_eq!(it.next(), None);
 }
+
 
 #[test]
-fn test_path_builder_line_to_after_close() {
-    let mut p = Path::builder();
-    p.line_to(point(1.0, 0.0));
-    p.close();
-    p.line_to(point(2.0, 0.0));
-
-    let path = p.build();
-    let mut it = path.iter();
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(0.0, 0.0))));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(0.0, 0.0), to: point(1.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Close(LineSegment { from: point(1.0, 0.0), to: point(0.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(0.0, 0.0))));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment {from: point(0.0, 0.0), to: point(2.0, 0.0) })));
-    assert_eq!(it.next(), None);
-}
-
-/// Builder for flattened paths
-pub type FlattenedPathBuilder = SvgPathBuilder<FlatteningBuilder<Builder>>;
-/// FlattenedPathBuilder constructor.
-pub fn flattened_path_builder(tolerance: f32) -> FlattenedPathBuilder {
-    SvgPathBuilder::new(FlatteningBuilder::new(Path::builder(), tolerance))
-}
-
-#[test]
-fn test_merge_paths() {
+fn test_concatenate() {
     let mut builder = Path::builder();
-    builder.move_to(point(0.0, 0.0));
+    builder.begin(point(0.0, 0.0));
     builder.line_to(point(5.0, 0.0));
     builder.line_to(point(5.0, 5.0));
-    builder.close();
+    builder.end(true);
 
     let path1 = builder.build();
 
     let mut builder = Path::builder();
-    builder.move_to(point(1.0, 1.0));
+    builder.begin(point(1.0, 1.0));
     builder.line_to(point(4.0, 0.0));
     builder.line_to(point(4.0, 4.0));
-    builder.close();
+    builder.end(true);
 
     let path2 = builder.build();
 
-    let path = path1.merge(&path2);
+    let mut builder = Path::builder();
+    builder.concatenate(&[
+        path1.as_slice(),
+        path2.as_slice(),
+    ]);
+    let path = builder.build();
 
     let mut it = path.iter();
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(0.0, 0.0))));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(0.0, 0.0), to: point(5.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(5.0, 0.0), to: point(5.0, 5.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Close(LineSegment { from: point(5.0, 5.0), to: point(0.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::MoveTo(point(1.0, 1.0))));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(1.0, 1.0), to: point(4.0, 0.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Line(LineSegment { from: point(4.0, 0.0), to: point(4.0, 4.0) })));
-    assert_eq!(it.next(), Some(PathEvent::Close(LineSegment { from: point(4.0, 4.0), to: point(1.0, 1.0) })));
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Begin {
+            at: point(0.0, 0.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Line {
+            from: point(0.0, 0.0),
+            to: point(5.0, 0.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Line {
+            from: point(5.0, 0.0),
+            to: point(5.0, 5.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::End {
+            last: point(5.0, 5.0),
+            first: point(0.0, 0.0),
+            close: true
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Begin {
+            at: point(1.0, 1.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Line {
+            from: point(1.0, 1.0),
+            to: point(4.0, 0.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Line {
+            from: point(4.0, 0.0),
+            to: point(4.0, 4.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::End {
+            last: point(4.0, 4.0),
+            first: point(1.0, 1.0),
+            close: true
+        })
+    );
     assert_eq!(it.next(), None);
 }
 
 #[test]
-fn test_prev_cursor() {
+fn test_pop(){
     let mut builder = Path::builder();
-    let start1 = builder.cursor();
-    builder.move_to(point(1.0, 1.0));
-    builder.line_to(point(2.0, 1.0));
-    builder.quadratic_bezier_to(point(2.0, 2.0), point(3.0, 2.0));
-    builder.cubic_bezier_to(point(4.0, 1.0), point(5.0, 2.0), point(6.0, 1.0));
-    let mut c1 = builder.cursor();
-    builder.move_to(point(11.0, 1.0));
-    let start2 = builder.cursor();
-    builder.line_to(point(12.0, 1.0));
-    builder.quadratic_bezier_to(point(12.0, 2.0), point(13.0, 2.0));
-    builder.cubic_bezier_to(point(14.0, 1.0), point(15.0, 2.0), point(16.0, 1.0));
-    let mut c2 = builder.cursor();
+    builder.begin(point(0.0, 0.0));
+    builder.line_to(point(5.0, 0.0));
+    builder.line_to(point(5.0, 5.0));
+    builder.end(true);
+
+    builder.open();
+    builder.pop();
+    builder.line_to(point(7.0, 7.0));
+    builder.end(true);
+
     let path = builder.build();
 
-    assert_eq!(start1.event(&path), PathEvent::MoveTo(point(1.0, 1.0)));
-    assert_eq!(start2.event(&path), PathEvent::MoveTo(point(11.0, 1.0)));
-
-    assert_eq!(c1.event(&path), PathEvent::Cubic(CubicBezierSegment {
-        from: point(3.0, 2.0),
-        ctrl1: point(4.0, 1.0),
-        ctrl2: point(5.0, 2.0),
-        to: point(6.0, 1.0),
-    }));
-    assert_eq!(c2.event(&path), PathEvent::Cubic(CubicBezierSegment {
-        from: point(13.0, 2.0),
-        ctrl1: point(14.0, 1.0),
-        ctrl2: point(15.0, 2.0),
-        to: point(16.0, 1.0),
-    }));
-
-    assert!(c1.previous(&path));
-    assert!(c2.previous(&path));
-    assert_eq!(c1.first_vertex, start1.vertex);
-    assert_eq!(c1.first_verb, start1.verb);
-
-    assert_eq!(c1.event(&path), PathEvent::Quadratic(QuadraticBezierSegment {
-        from: point(2.0, 1.0),
-        ctrl: point(2.0, 2.0),
-        to: point(3.0, 2.0),
-    }));
-    assert_eq!(c2.event(&path), PathEvent::Quadratic(QuadraticBezierSegment {
-        from: point(12.0, 1.0),
-        ctrl: point(12.0, 2.0),
-        to: point(13.0, 2.0),
-    }));
-
-    assert!(c1.previous(&path));
-    assert!(c2.previous(&path));
-    assert_eq!(c1.first_vertex, start1.vertex);
-    assert_eq!(c1.first_verb, start1.verb);
-
-    assert_eq!(c1.event(&path), PathEvent::Line(LineSegment {
-        from: point(1.0, 1.0),
-        to: point(2.0, 1.0),
-    }));
-    assert_eq!(c2.event(&path), PathEvent::Line(LineSegment {
-        from: point(11.0, 1.0),
-        to: point(12.0, 1.0),
-    }));
-
-    assert!(c1.previous(&path));
-    assert!(c2.previous(&path));
-    assert_eq!(c1.first_vertex, start1.vertex);
-    assert_eq!(c1.first_verb, start1.verb);
-    assert_eq!(c2, start2);
-
-    assert_eq!(c1.event(&path), PathEvent::MoveTo(point(1.0, 1.0)));
-    assert_eq!(c2.event(&path), PathEvent::MoveTo(point(11.0, 1.0)));
-
-    assert!(!c1.previous(&path));
-    assert!(c2.previous(&path));
-
-    assert_eq!(c2.event(&path), PathEvent::Cubic(CubicBezierSegment {
-        from: point(3.0, 2.0),
-        ctrl1: point(4.0, 1.0),
-        ctrl2: point(5.0, 2.0),
-        to: point(6.0, 1.0),
-    }));
-
-    assert_eq!(c2.first_verb, start1.verb);
+    let mut it = path.iter();
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Begin {
+            at: point(0.0, 0.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Line {
+            from: point(0.0, 0.0),
+            to: point(5.0, 0.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::Line {
+            from: point(5.0, 0.0),
+            to: point(7.0, 7.0)
+        })
+    );
+    assert_eq!(
+        it.next(),
+        Some(PathEvent::End {
+            last: point(7.0, 7.0),
+            first: point(0.0, 0.0),
+            close: true
+        })
+    );
+    assert_eq!(it.next(), None);
 }

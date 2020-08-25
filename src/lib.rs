@@ -59,8 +59,9 @@
 //!
 //! # Additional documentation and links
 //!
-//! * [very basic gfx-rs example](https://github.com/nical/lyon/tree/master/examples/gfx_basic).
-//! * [advanced gfx-rs example](https://github.com/nical/lyon/tree/master/examples/gfx_advanced).
+//! * [wgpu example](https://github.com/nical/lyon/tree/master/examples/wgpu).
+//! * [wgpu_svg example](https://github.com/nical/lyon/tree/master/examples/wgpu_svg) similar to the first example,
+//!   can render a very small subset of SVG.
 //! * There is some useful documentation on the project's [wiki](https://github.com/nical/lyon/wiki).
 //! * The source code is available on the project's [git repository](https://github.com/nical/lyon).
 //! * Interested in contributing? Pull requests are welcome. If you would like to help but don't know
@@ -76,17 +77,23 @@
 //! to obtain the fill tessellation a rectangle with rounded corners:
 //!
 //! ```
-//! use lyon::math::rect;
-//! use lyon::tessellation::{VertexBuffers, FillOptions, FillVertex};
-//! use lyon::tessellation::basic_shapes::*;
+//! use lyon::math::{rect, Point};
+//! use lyon::path::{builder::*, Winding};
+//! use lyon::tessellation::{FillTessellator, FillOptions, VertexBuffers};
 //! use lyon::tessellation::geometry_builder::simple_builder;
 //!
 //! fn main() {
-//!     let mut geometry: VertexBuffers<FillVertex, u16> = VertexBuffers::new();
-//!
+//!     let mut geometry: VertexBuffers<Point, u16> = VertexBuffers::new();
+//!     let mut geometry_builder = simple_builder(&mut geometry);
 //!     let options = FillOptions::tolerance(0.1);
+//!     let mut tessellator = FillTessellator::new();
 //!
-//!     fill_rounded_rectangle(
+//!     let mut builder = tessellator.builder(
+//!         &options,
+//!         &mut geometry_builder,
+//!     );
+//!
+//!     builder.add_rounded_rectangle(
 //!         &rect(0.0, 0.0, 100.0, 50.0),
 //!         &BorderRadii {
 //!             top_left: 10.0,
@@ -94,9 +101,10 @@
 //!             bottom_left: 20.0,
 //!             bottom_right: 25.0,
 //!         },
-//!         &options,
-//!         &mut simple_builder(&mut geometry),
+//!         Winding::Positive
 //!     );
+//!
+//!     builder.build();
 //!
 //!     // The tessellated geometry is ready to be uploaded to the GPU.
 //!     println!(" -- {} vertices {} indices",
@@ -111,7 +119,7 @@
 //!
 //! ```
 //! extern crate lyon;
-//! use lyon::math::point;
+//! use lyon::math::{point, Point};
 //! use lyon::path::Path;
 //! use lyon::path::builder::*;
 //! use lyon::tessellation::*;
@@ -119,16 +127,16 @@
 //! fn main() {
 //!     // Build a Path.
 //!     let mut builder = Path::builder();
-//!     builder.move_to(point(0.0, 0.0));
+//!     builder.begin(point(0.0, 0.0));
 //!     builder.line_to(point(1.0, 0.0));
 //!     builder.quadratic_bezier_to(point(2.0, 0.0), point(2.0, 1.0));
 //!     builder.cubic_bezier_to(point(1.0, 1.0), point(0.0, 1.0), point(0.0, 0.0));
-//!     builder.close();
+//!     builder.end(true);
 //!     let path = builder.build();
 //!
 //!     // Let's use our own custom vertex type instead of the default one.
 //!     #[derive(Copy, Clone, Debug)]
-//!     struct MyVertex { position: [f32; 2], normal: [f32; 2] };
+//!     struct MyVertex { position: [f32; 2] };
 //!
 //!     // Will contain the result of the tessellation.
 //!     let mut geometry: VertexBuffers<MyVertex, u16> = VertexBuffers::new();
@@ -140,10 +148,9 @@
 //!         tessellator.tessellate_path(
 //!             &path,
 //!             &FillOptions::default(),
-//!             &mut BuffersBuilder::new(&mut geometry, |vertex : FillVertex| {
+//!             &mut BuffersBuilder::new(&mut geometry, |vertex: FillVertex| {
 //!                 MyVertex {
-//!                     position: vertex.position.to_array(),
-//!                     normal: vertex.normal.to_array(),
+//!                     position: vertex.position().to_array(),
 //!                 }
 //!             }),
 //!         ).unwrap();
@@ -170,25 +177,29 @@
 //!
 //! Lyon does not provide with any GPU abstraction or rendering backend (for now).
 //! It is up to the user of this crate to decide whether to use OpenGL, vulkan, gfx-rs,
-//! glium, or any low level graphics API and how to render it.
-//! The [basic](https://github.com/nical/lyon/tree/master/examples/gfx_basic) and
-//! [advanced](https://github.com/nical/lyon/tree/master/examples/gfx_advanced) gfx-rs
-//! examples can be used to get an idea of how to render the geometry (in this case
-//! using gfx-rs).
-//!
+//! wgpu, glium, or any low level graphics API and how to render it.
+//! The [wgpu example](https://github.com/nical/lyon/tree/master/examples/wgpu)
+//! can be used to get an idea of how to render the geometry (in this case
+//! using wgpu).
 
-pub extern crate lyon_tessellation;
 pub extern crate lyon_algorithms;
-#[cfg(feature = "extra")] pub extern crate lyon_extra;
-#[cfg(feature = "svg")] pub extern crate lyon_svg;
-#[cfg(feature = "libtess2")] pub extern crate lyon_tess2;
+#[cfg(feature = "extra")]
+pub extern crate lyon_extra;
+#[cfg(feature = "svg")]
+pub extern crate lyon_svg;
+#[cfg(feature = "libtess2")]
+pub extern crate lyon_tess2;
+pub extern crate lyon_tessellation;
 
-pub use lyon_tessellation as tessellation;
 pub use lyon_algorithms as algorithms;
-pub use tessellation::path as path;
-pub use tessellation::geom as geom;
-#[cfg(feature = "svg")] pub use lyon_svg as svg;
-#[cfg(feature = "extra")] pub use lyon_extra as extra;
-#[cfg(feature = "libtess2")] pub use lyon_tess2 as tess2;
+#[cfg(feature = "extra")]
+pub use lyon_extra as extra;
+#[cfg(feature = "svg")]
+pub use lyon_svg as svg;
+#[cfg(feature = "libtess2")]
+pub use lyon_tess2 as tess2;
+pub use lyon_tessellation as tessellation;
+pub use tessellation::geom;
+pub use tessellation::path;
 
-pub use geom::math;
+pub use path::math;

@@ -1,8 +1,9 @@
-use crate::path::builder::*;
 use crate::math::*;
+use crate::path::builder::*;
+use crate::path::EndpointId;
+use crate::path::private::{flatten_quadratic_bezier, flatten_cubic_bezier};
 
 use std::ops::Range;
-use std::mem;
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
@@ -29,8 +30,8 @@ impl FlattenedPath {
     }
 
     /// Creates a builder for flattened paths.
-    pub fn builder() -> Builder {
-        Builder::new()
+    pub fn builder(tolerance: f32) -> Builder {
+        Builder::new(tolerance)
     }
 
     /// Returns whether the path is empty.
@@ -67,8 +68,8 @@ impl FlattenedPath {
 
 /// An iterator of the sub paths of a flattened path.
 pub struct SubPaths<'l> {
-    points: &'l[Point],
-    sub_paths: &'l[SubPathInfo],
+    points: &'l [Point],
+    sub_paths: &'l [SubPathInfo],
 }
 
 impl<'l> SubPaths<'l> {
@@ -98,7 +99,7 @@ impl<'l> Iterator for SubPaths<'l> {
         let sp = self.sub_paths[0].clone();
         self.sub_paths = &self.sub_paths[1..];
 
-        Some(SubPath{
+        Some(SubPath {
             points: &self.points[sp.range],
             is_closed: sp.is_closed,
         })
@@ -107,13 +108,13 @@ impl<'l> Iterator for SubPaths<'l> {
 
 /// An iterator over the points of a sub-path.
 pub struct SubPath<'l> {
-    points: &'l[Point],
+    points: &'l [Point],
     is_closed: bool,
 }
 
 impl<'l> SubPath<'l> {
     /// Returns a slice of the points of this sub-path.
-    pub fn points(&self) -> &'l[Point] {
+    pub fn points(&self) -> &'l [Point] {
         self.points
     }
 
@@ -129,14 +130,16 @@ pub struct Builder {
     points: Vec<Point>,
     sub_paths: Vec<SubPathInfo>,
     sp_start: usize,
+    tolerance: f32,
 }
 
 impl Builder {
-    pub fn new() -> Self {
+    pub fn new(tolerance: f32) -> Self {
         Builder {
             points: Vec::new(),
             sub_paths: Vec::new(),
             sp_start: 0,
+            tolerance,
         }
     }
 
@@ -147,24 +150,12 @@ impl Builder {
         }
     }
 
-    pub fn with_svg(self, tolerance: f32) -> SvgPathBuilder<FlatteningBuilder<Self>> {
-        SvgPathBuilder::new(FlatteningBuilder::new(self, tolerance))
+    pub fn with_svg(self, tolerance: f32) -> WithSvg<Flattened<Self>> {
+        WithSvg::new(Flattened::new(self, tolerance))
     }
 
-    /// Add a closed polygon to the path.
-    pub fn polygon(&mut self, points: &[Point]) {
-        if points.is_empty() {
-            return;
-        }
-
-        let start = self.points.len();
-        self.points.extend_from_slice(points);
-        let end = self.points.len();
-
-        self.sub_paths.push(SubPathInfo {
-            range: start..end,
-            is_closed: true,
-        });
+    pub fn current_position(&self) -> Point {
+        *self.points.last().unwrap()
     }
 }
 
@@ -177,18 +168,10 @@ impl Build for Builder {
             sub_paths: self.sub_paths,
         }
     }
-
-    fn build_and_reset(&mut self) -> FlattenedPath {
-        self.sp_start = 0;
-        FlattenedPath {
-            points: mem::replace(&mut self.points, Vec::new()),
-            sub_paths: mem::replace(&mut self.sub_paths, Vec::new()),
-        }
-    }
 }
 
-impl FlatPathBuilder for Builder {
-    fn move_to(&mut self, to: Point) {
+impl PathBuilder for Builder {
+    fn begin(&mut self, to: Point) -> EndpointId {
         nan_check(to);
         let sp_end = self.points.len();
         if self.sp_start != sp_end {
@@ -199,34 +182,35 @@ impl FlatPathBuilder for Builder {
         }
         self.sp_start = sp_end;
         self.points.push(to);
+
+        EndpointId(sp_end as u32)
     }
 
-    fn line_to(&mut self, to: Point) {
+    fn line_to(&mut self, to: Point) -> EndpointId {
         nan_check(to);
+        let id = EndpointId(self.points.len() as u32);
         self.points.push(to);
+
+        id
     }
 
-    fn close(&mut self) {
+    fn end(&mut self, close: bool) {
         let sp_end = self.points.len();
         if self.sp_start != sp_end {
             self.sub_paths.push(SubPathInfo {
                 range: self.sp_start..sp_end,
-                is_closed: true,
+                is_closed: close,
             });
         }
         self.sp_start = sp_end;
     }
 
-    fn current_position(&self) -> Point {
-        self.points.last().cloned().unwrap_or(Point::new(0.0, 0.0))
+    fn quadratic_bezier_to(&mut self, ctrl: Point, to: Point) -> EndpointId {
+        flatten_quadratic_bezier(self.tolerance, self.current_position(), ctrl, to, self)
     }
-}
 
-impl PolygonBuilder for Builder {
-    /// Add a closed polygon.
-    fn polygon(&mut self, points: &[Point]) {
-        self.points.reserve(points.len());
-        build_polygon(self, points)
+    fn cubic_bezier_to(&mut self, ctrl1: Point, ctrl2: Point, to: Point) -> EndpointId {
+        flatten_cubic_bezier(self.tolerance, self.current_position(), ctrl1, ctrl2, to, self)
     }
 }
 

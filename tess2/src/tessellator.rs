@@ -1,13 +1,15 @@
-use crate::math::*;
 use crate::flattened_path::FlattenedPath;
-use crate::tessellation::{GeometryReceiver, FillOptions, FillRule, Count};
+use crate::math::*;
 use crate::path::builder::*;
 use crate::path::PathEvent;
+use crate::path::PathSlice;
+use crate::tessellation::{Count, FillOptions, FillRule};
+use crate::geometry_builder::GeometryReceiver;
 
-use tess2_sys::*;
+use std::os::raw::c_void;
 use std::ptr;
 use std::slice;
-use std::os::raw::c_void;
+use tess2_sys::*;
 
 /// A fill tessellator implemented on top of [libtess2](https://github.com/memononen/libtess2).
 ///
@@ -29,16 +31,16 @@ impl FillTessellator {
     }
 
     /// Compute the tessellation from a path iterator.
-    pub fn tessellate_path<Iter>(
+    pub fn tessellate<Iter>(
         &mut self,
         it: Iter,
         options: &FillOptions,
-        output: &mut dyn GeometryReceiver<Point>,
+        output: &mut dyn GeometryReceiver,
     ) -> Result<Count, ()>
     where
         Iter: IntoIterator<Item = PathEvent>,
     {
-        let mut builder = FlattenedPath::builder().with_svg(options.tolerance);
+        let mut builder = FlattenedPath::builder(options.tolerance);
 
         for evt in it {
             builder.path_event(evt);
@@ -46,11 +48,7 @@ impl FillTessellator {
 
         let flattened_path = builder.build();
 
-        self.tessellate_flattened_path(
-            &flattened_path,
-            options,
-            output,
-        )
+        self.tessellate_flattened_path(&flattened_path, options, output)
     }
 
     /// Compute the tessellation from a pre-flattened path.
@@ -58,7 +56,7 @@ impl FillTessellator {
         &mut self,
         path: &FlattenedPath,
         options: &FillOptions,
-        output: &mut dyn GeometryReceiver<Point>,
+        output: &mut dyn GeometryReceiver,
     ) -> Result<Count, ()> {
         self.prepare_path(path);
 
@@ -67,6 +65,16 @@ impl FillTessellator {
         }
 
         Ok(self.process_output(output))
+    }
+
+    /// Compute the tessellation from a path slice.
+    pub fn tessellate_path<'l>(
+        &'l mut self,
+        path: impl Into<PathSlice<'l>>,
+        options: &'l FillOptions,
+        output: &mut dyn GeometryReceiver,
+    ) -> Result<Count, ()> {
+        self.tessellate(path.into().iter(), options, output)
     }
 
     fn prepare_path(&mut self, path: &FlattenedPath) {
@@ -79,7 +87,7 @@ impl FillTessellator {
                     2,
                     (&first_point.x as *const f32) as *const c_void,
                     8,
-                    num_points as i32
+                    num_points as i32,
                 );
             }
         }
@@ -88,15 +96,12 @@ impl FillTessellator {
     fn do_tessellate(&mut self, options: &FillOptions) -> bool {
         unsafe {
             let winding_rule = match options.fill_rule {
-                FillRule::EvenOdd => {
-                    TessWindingRule::TESS_WINDING_ODD
-                }
-                FillRule::NonZero => {
-                    TessWindingRule::TESS_WINDING_NONZERO
-                }
+                FillRule::EvenOdd => TessWindingRule::TESS_WINDING_ODD,
+                FillRule::NonZero => TessWindingRule::TESS_WINDING_NONZERO,
             };
 
-            let res = tessTesselate(self.tess,
+            let res = tessTesselate(
+                self.tess,
                 winding_rule,
                 TessElementType::TESS_POLYGONS,
                 3,
@@ -108,19 +113,15 @@ impl FillTessellator {
         }
     }
 
-    fn process_output(&mut self, output: &mut dyn GeometryReceiver<Point>) -> Count {
+    fn process_output(&mut self, output: &mut dyn GeometryReceiver) -> Count {
         unsafe {
             let num_indices = tessGetElementCount(self.tess) as usize * 3;
             let num_vertices = tessGetElementCount(self.tess) as usize;
 
-            let vertices = slice::from_raw_parts(
-                tessGetVertices(self.tess) as *const Point,
-                num_vertices
-            );
-            let indices = slice::from_raw_parts(
-                tessGetElements(self.tess) as *const u32,
-                num_indices,
-            );
+            let vertices =
+                slice::from_raw_parts(tessGetVertices(self.tess) as *const Point, num_vertices);
+            let indices =
+                slice::from_raw_parts(tessGetElements(self.tess) as *const u32, num_indices);
 
             output.set_geometry(vertices, indices);
 
@@ -134,7 +135,7 @@ impl FillTessellator {
 
 impl Drop for FillTessellator {
     fn drop(&mut self) {
-        unsafe{
+        unsafe {
             tessDeleteTess(self.tess);
         }
     }

@@ -1,5 +1,7 @@
 #![doc(html_logo_url = "https://nical.github.io/lyon-doc/lyon-logo.svg")]
 #![deny(bare_trait_objects)]
+#![deny(unconditional_recursion)]
+// TODO: Tessellation pipeline diagram needs to be updated.
 
 //! Tessellation of 2D fill and stroke operations.
 //!
@@ -38,7 +40,6 @@
 //!   [geometry_builder module](geometry_builder/index.html)) which the above two are built on. This trait
 //!   provides an interface for types that help with building and assembling the vertices and triangles that
 //!   form the tessellation, usually in the form of arbitrary vertex and index buffers.
-//! * The various specialized tessellators in the [`basic_shapes`](basic_shapes/index.html) modules.
 //!
 //! ## The tessellation pipeline
 //!
@@ -118,8 +119,7 @@
 //!   </text>
 //! </svg>
 //!
-//! The figure above shows each step of the fill tessellation pipeline.
-//! Tessellating strokes works the same way using `StrokeVertex` instead of `FillVertex`.
+//! The figure above shows a simplified summary of each step of the fill tessellation pipeline.
 //!
 //! ### The input: iterators
 //!
@@ -155,8 +155,8 @@
 //! The tessellators produce geometry in the form of vertex and index buffers which are expected
 //! to be rendered using the equivalent of OpenGL's `glDrawElements` with mode `GL_TRIANGLES` available
 //! under various names in the different graphics APIs.
-//! There is a [basic example](https://github.com/nical/lyon/tree/master/examples/gfx_basic) showing how
-//! it can be done with gfx-rs.
+//! There is an [example](https://github.com/nical/lyon/tree/master/examples/wgpu) showing how
+//! it can be done with wgpu.
 //!
 //! ### Flattening and tolerance
 //!
@@ -169,7 +169,7 @@
 //!
 //! ## Examples
 //!
-//! - [Tessellating path fills](path_fill/struct.FillTessellator.html#examples).
+//! - [Tessellating path fills](fill/struct.FillTessellator.html#examples).
 //! - [Tessellating path strokes](path_stroke/struct.StrokeTessellator.html#examples).
 //! - [Generating custom vertices](geometry_builder/index.html#generating-custom-vertices).
 //! - [Generating completely custom output](geometry_builder/index.html#generating-a-completely-custom-output).
@@ -181,19 +181,19 @@
 
 pub use lyon_path as path;
 
-#[cfg(test)] use lyon_extra as extra;
+#[cfg(test)]
+use lyon_extra as extra;
 
 #[cfg(feature = "serialization")]
 #[macro_use]
 pub extern crate serde;
 
-pub mod basic_shapes;
+mod event_queue;
+mod fill;
 pub mod geometry_builder;
-pub mod debugger;
-mod path_fill;
-mod path_stroke;
 mod math_utils;
-mod fixed;
+mod monotone;
+mod stroke;
 
 #[cfg(test)]
 mod earcut_tests;
@@ -207,18 +207,44 @@ pub use crate::path::math;
 pub use crate::path::geom;
 
 #[doc(inline)]
-pub use crate::path_fill::*;
+pub use crate::event_queue::*;
 
 #[doc(inline)]
-pub use crate::path_stroke::*;
+pub use crate::fill::*;
 
 #[doc(inline)]
-pub use crate::geometry_builder::{GeometryBuilder, GeometryReceiver, VertexBuffers, BuffersBuilder, VertexConstructor, Count};
+pub use crate::stroke::*;
+
+#[doc(inline)]
+pub use crate::geometry_builder::{
+    BuffersBuilder, Count, FillGeometryBuilder,
+    FillVertexConstructor, GeometryBuilder, GeometryBuilderError,
+    StrokeGeometryBuilder, StrokeVertexConstructor, VertexBuffers,
+};
 
 pub use crate::path::FillRule;
 
+use crate::path::EndpointId;
+
+use std::ops::{Add, Sub};
+use std::u32;
+
 /// The fill tessellator's result type.
 pub type TessellationResult = Result<Count, TessellationError>;
+
+/// Describes an unexpected error happening during tessellation.
+///
+/// If you run into one of these, please consider
+/// [filing an issue](https://github.com/nical/lyon/issues/new).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum InternalError {
+    IncorrectActiveEdgeOrder(i16),
+    InsufficientNumberOfSpans,
+    InsufficientNumberOfEdges,
+    MergeVertexOutside,
+    InvalidNumberOfEdgesBelowVertex,
+    ErrorCode(i16),
+}
 
 /// The fill tessellator's error enumeration.
 #[derive(Clone, Debug, PartialEq)]
@@ -226,18 +252,21 @@ pub enum TessellationError {
     UnsupportedParamater,
     InvalidVertex,
     TooManyVertices,
-    Internal(InternalError)
+    Internal(InternalError),
 }
 
-/// Something unexpectedly put the tessellator in a bad state.
-///
-/// If you run into this error code, please [file an issue](https://github.com/nical/lyon/issues).
-#[derive(Clone, Debug, PartialEq)]
-pub enum InternalError {
-    E01,
-    E02,
-    E03,
-    E04,
+impl From<GeometryBuilderError> for TessellationError {
+    fn from(e: GeometryBuilderError) -> Self {
+        match e {
+            GeometryBuilderError::InvalidVertex => TessellationError::InvalidVertex,
+            GeometryBuilderError::TooManyVertices => TessellationError::TooManyVertices,
+        }
+    }
+}
+impl From<InternalError> for TessellationError {
+    fn from(e: InternalError) -> Self {
+        TessellationError::Internal(e)
+    }
 }
 
 /// Left or right.
@@ -256,9 +285,13 @@ impl Side {
         }
     }
 
-    pub fn is_left(self) -> bool { self == Side::Left }
+    pub fn is_left(self) -> bool {
+        self == Side::Left
+    }
 
-    pub fn is_right(self) -> bool { self == Side::Right }
+    pub fn is_right(self) -> bool {
+        self == Side::Right
+    }
 }
 
 /// Before or After. Used to describe position relative to a join.
@@ -277,39 +310,34 @@ impl Order {
         }
     }
 
-    pub fn is_before(self) -> bool { self == Order::Before }
+    pub fn is_before(self) -> bool {
+        self == Order::Before
+    }
 
-    pub fn is_after(self) -> bool { self == Order::After }
+    pub fn is_after(self) -> bool {
+        self == Order::After
+    }
 }
 
-/// Vertex produced by the stroke tessellators.
-#[derive(Copy, Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-pub struct StrokeVertex {
-    /// Position of the vertex (on the path, the consumer should move the point along
-    /// the provided normal in order to give the stroke a width).
-    pub position: math::Point,
-    /// Normal at this vertex such that extruding the vertices along the normal would
-    /// produce a stroke of width 2.0 (1.0 on each side). This vector is not normalized.
-    pub normal: math::Vector,
-    /// How far along the path this vertex is.
-    pub advancement: f32,
-    /// Whether the vertex is on the left or right side of the path.
-    pub side: Side,
-}
+pub use fill::FillVertex;
+pub use stroke::StrokeVertex;
 
-/// Vertex produced by the fill tessellators.
+/// Where a vertex produced by a tessellator comes from in the original path.
+///
+/// In most cases, vertices come directly from an endpoint. However, Curve
+/// approximations and self-intersections can introduce vertices that are on
+/// one or several edges, at a certain parameter `t` between the two endpoints
+/// of the edge.
 #[derive(Copy, Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-pub struct FillVertex {
-    /// Position of the vertex (on the path).
-    pub position: math::Point,
-    /// Normal at this vertex such that extruding the vertices along the normal would
-    /// produce a stroke of width 2.0 (1.0 on each side). This vector is not normalized.
-    ///
-    /// Note that some tessellators aren't fully implemented and don't provide the
-    /// normal (a nil vector is provided instead). Refer the documentation of each tessellator.
-    pub normal: math::Vector,
+pub enum VertexSource {
+    Endpoint {
+        id: EndpointId,
+    },
+    Edge {
+        from: EndpointId,
+        to: EndpointId,
+        t: f32,
+    },
 }
 
 /// Line cap as defined by the SVG specification.
@@ -375,6 +403,14 @@ pub enum LineJoin {
     Bevel,
 }
 
+/// Vertical or Horizontal.
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
+pub enum Orientation {
+    Horizontal,
+    Vertical,
+}
+
 /// Parameters for the tessellator.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
@@ -411,15 +447,6 @@ pub struct StrokeOptions {
     /// Default value: `StrokeOptions::DEFAULT_TOLERANCE`.
     pub tolerance: f32,
 
-    /// Apply line width
-    ///
-    /// When set to false, the generated vertices will all be positioned in the centre
-    /// of the line. The width can be applied later on (eg in a vertex shader) by adding
-    /// the vertex normal multiplied by the line with to each vertex position.
-    ///
-    /// Default value: `true`.
-    pub apply_line_width: bool,
-
     // To be able to add fields without making it a breaking change, add an empty private field
     // which makes it impossible to create a StrokeOptions without calling the constructor.
     _private: (),
@@ -446,7 +473,6 @@ impl StrokeOptions {
         line_width: Self::DEFAULT_LINE_WIDTH,
         miter_limit: Self::DEFAULT_MITER_LIMIT,
         tolerance: Self::DEFAULT_TOLERANCE,
-        apply_line_width: true,
         _private: (),
     };
 
@@ -498,11 +524,11 @@ impl StrokeOptions {
         self.miter_limit = limit;
         self
     }
+}
 
-    #[inline]
-    pub fn dont_apply_line_width(mut self) -> Self {
-        self.apply_line_width = false;
-        self
+impl Default for StrokeOptions {
+    fn default() -> Self {
+        Self::DEFAULT
     }
 }
 
@@ -525,35 +551,24 @@ pub struct FillOptions {
     /// Default value: `EvenOdd`.
     pub fill_rule: FillRule,
 
-    /// Whether or not to compute the normal vector at each vertex.
+    /// Whether to perform a vertical or horizontal traversal of the geometry.
     ///
-    /// When set to false, all generated vertex normals are equal to `vector(0.0, 0.0)`.
-    /// Not computing vertex normals can speed up tessellation and enable generating less vertices
-    /// at intersections.
-    ///
-    /// Default value: `true`.
-    pub compute_normals: bool,
+    /// Default value: `Vertical`.
+    pub sweep_orientation: Orientation,
 
     /// A fast path to avoid some expensive operations if the path is known to
     /// not have any self-intersections.
     ///
-    /// Do not set this to `true` if the path may have intersecting edges else
+    /// Do not set this to `false` if the path may have intersecting edges else
     /// the tessellator may panic or produce incorrect results. In doubt, do not
     /// change the default value.
     ///
-    /// Default value: `false`.
-    pub assume_no_intersections: bool,
-
-    /// What to do if the tessellator detects an error.
-    pub on_error: OnError,
+    /// Default value: `true`.
+    pub handle_intersections: bool,
 
     // To be able to add fields without making it a breaking change, add an empty private field
     // which makes it impossible to create a FillOptions without the calling constructor.
     _private: (),
-}
-
-impl Default for StrokeOptions {
-    fn default() -> Self { Self::DEFAULT }
 }
 
 impl FillOptions {
@@ -561,18 +576,21 @@ impl FillOptions {
     pub const DEFAULT_TOLERANCE: f32 = 0.1;
     /// Default Fill rule.
     pub const DEFAULT_FILL_RULE: FillRule = FillRule::EvenOdd;
+    /// Default orientation.
+    pub const DEFAULT_SWEEP_ORIENTATION: Orientation = Orientation::Vertical;
 
     pub const DEFAULT: Self = FillOptions {
         tolerance: Self::DEFAULT_TOLERANCE,
         fill_rule: Self::DEFAULT_FILL_RULE,
-        compute_normals: true,
-        assume_no_intersections: false,
-        on_error: OnError::DEFAULT,
+        sweep_orientation: Self::DEFAULT_SWEEP_ORIENTATION,
+        handle_intersections: true,
         _private: (),
     };
 
     #[inline]
-    pub fn even_odd() -> Self { Self::DEFAULT }
+    pub fn even_odd() -> Self {
+        Self::DEFAULT
+    }
 
     #[inline]
     pub fn tolerance(tolerance: f32) -> Self {
@@ -593,59 +611,110 @@ impl FillOptions {
     }
 
     #[inline]
-    pub fn with_normals(mut self, normals: bool) -> Self {
-        self.compute_normals = normals;
+    pub fn with_fill_rule(mut self, rule: FillRule) -> Self {
+        self.fill_rule = rule;
         self
     }
 
     #[inline]
-    pub fn assume_no_intersections(mut self) -> Self {
-        self.assume_no_intersections = true;
+    pub fn with_sweep_orientation(mut self, orientation: Orientation) -> Self {
+        self.sweep_orientation = orientation;
         self
     }
 
     #[inline]
-    pub fn on_error(mut self, policy: OnError) -> Self {
-        self.on_error = policy;
+    pub fn with_intersections(mut self, intersections: bool) -> Self {
+        self.handle_intersections = intersections;
         self
     }
 }
 
 impl Default for FillOptions {
-    fn default() -> Self { Self::DEFAULT }
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
-/// Defines the tessellator the should try to behave when detecting
-/// an error.
-#[derive(Copy, Clone, Debug, PartialEq)]
+type Index = u32;
+
+/// A virtual vertex offset in a geometry.
+///
+/// The `VertexId`s are only valid between `GeometryBuilder::begin_geometry` and
+/// `GeometryBuilder::end_geometry`. `GeometryBuilder` implementations typically be translate
+/// the ids internally so that first `VertexId` after `begin_geometry` is zero.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-pub enum OnError {
-    /// Panic as soon as the error is detected.
-    ///
-    /// Most suitable for testing.
-    Panic,
-    /// Interrupt tessellation and return an error.
-    Stop,
-    /// Attempt to continue if possible, stop otherwise.
-    ///
-    /// The resulting tessellation may be locally incorrect.
-    Recover,
+pub struct VertexId(pub Index);
+
+impl VertexId {
+    pub const INVALID: VertexId = VertexId(u32::MAX);
+
+    pub fn offset(&self) -> Index {
+        self.0
+    }
+
+    pub fn to_usize(&self) -> usize {
+        self.0 as usize
+    }
+
+    pub fn from_usize(v: usize) -> Self {
+        VertexId(v as Index)
+    }
 }
 
-impl OnError {
-    #[cfg(test)]
-    pub const DEFAULT: Self = OnError::Panic;
-    #[cfg(not(test))]
-    pub const DEFAULT: Self = OnError::Stop;
+impl Add<u32> for VertexId {
+    type Output = Self;
+    fn add(self, rhs: u32) -> Self {
+        VertexId(self.0 + rhs)
+    }
 }
 
-impl Default for OnError {
-    fn default() -> Self { Self::DEFAULT }
+impl Sub<u32> for VertexId {
+    type Output = Self;
+    fn sub(self, rhs: u32) -> Self {
+        VertexId(self.0 - rhs)
+    }
 }
 
+impl From<u16> for VertexId {
+    fn from(v: u16) -> Self {
+        VertexId(v as Index)
+    }
+}
+impl From<u32> for VertexId {
+    fn from(v: u32) -> Self {
+        VertexId(v)
+    }
+}
+impl From<i32> for VertexId {
+    fn from(v: i32) -> Self {
+        VertexId(v as Index)
+    }
+}
+
+impl From<VertexId> for u16 {
+    fn from(v: VertexId) -> Self {
+        v.0 as u16
+    }
+}
+impl From<VertexId> for u32 {
+    fn from(v: VertexId) -> Self {
+        v.0
+    }
+}
+impl From<VertexId> for i32 {
+    fn from(v: VertexId) -> Self {
+        v.0 as i32
+    }
+}
+impl From<VertexId> for usize {
+    fn from(v: VertexId) -> Self {
+        v.0 as usize
+    }
+}
 
 #[test]
-fn test_without_miter_limit(){
+fn test_without_miter_limit() {
     let expected_limit = 4.0;
     let stroke_options = StrokeOptions::default();
 
@@ -653,7 +722,7 @@ fn test_without_miter_limit(){
 }
 
 #[test]
-fn test_with_miter_limit(){
+fn test_with_miter_limit() {
     let expected_limit = 3.0;
     let stroke_options = StrokeOptions::default().with_miter_limit(expected_limit);
 
@@ -662,6 +731,35 @@ fn test_with_miter_limit(){
 
 #[test]
 #[should_panic]
-fn test_with_invalid_miter_limit(){
+fn test_with_invalid_miter_limit() {
     let _ = StrokeOptions::default().with_miter_limit(0.0);
 }
+
+#[test]
+fn test_line_width() {
+    use crate::math::{Point, point};
+    let mut builder = crate::path::Path::builder();
+    builder.begin(point(0.0, 1.0));
+    builder.line_to(point(2.0, 1.0));
+    builder.end(false);
+    let path = builder.build();
+
+    let options = StrokeOptions::DEFAULT.with_line_width(2.0);
+    let mut geometry: VertexBuffers<Point, u16> = VertexBuffers::new();
+    StrokeTessellator::new().tessellate(
+        path.iter(),
+        &options,
+        &mut crate::geometry_builder::simple_builder(&mut geometry),
+    ).unwrap();
+
+
+    for p in &geometry.vertices {
+        assert!(
+            *p == point(0.0, 0.0)
+            || *p == point(0.0, 2.0)
+            || *p == point(2.0, 0.0)
+            || *p == point(2.0, 2.0)
+        );
+    }
+}
+

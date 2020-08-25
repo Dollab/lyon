@@ -1,29 +1,14 @@
 //! Elliptic arc related maths and tools.
 
-use std::ops::Range;
 use std::mem::swap;
+use std::ops::Range;
 
-use crate::Line;
-use crate::scalar::{Scalar, Float, cast};
-use crate::generic_math::{Point, point, Vector, vector, Rotation2D, Transform2D, Angle, Rect};
-use crate::segment::{Segment, FlattenedForEach, FlatteningStep, BoundingRect};
-use crate::segment;
-use crate::QuadraticBezierSegment;
+use crate::{point, vector, Angle, Point, Rect, Rotation, Transform, Vector};
+use crate::scalar::{cast, Float, Scalar};
+use crate::segment::{BoundingRect, Segment};
 use crate::CubicBezierSegment;
-
-/// A flattening iterator for arc segments.
-pub type Flattened<S> = segment::Flattened<S, Arc<S>>;
-
-/// An elliptic arc curve segment using the SVG's end-point notation.
-#[derive(Copy, Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-pub struct SvgArc<S> {
-    pub from: Point<S>,
-    pub to: Point<S>,
-    pub radii: Vector<S>,
-    pub x_rotation: Angle<S>,
-    pub flags: ArcFlags,
-}
+use crate::Line;
+use crate::QuadraticBezierSegment;
 
 /// An elliptic arc curve segment.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -34,6 +19,17 @@ pub struct Arc<S> {
     pub start_angle: Angle<S>,
     pub sweep_angle: Angle<S>,
     pub x_rotation: Angle<S>,
+}
+
+/// An elliptic arc curve segment using the SVG's end-point notation.
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
+pub struct SvgArc<S> {
+    pub from: Point<S>,
+    pub to: Point<S>,
+    pub radii: Vector<S>,
+    pub x_rotation: Angle<S>,
+    pub flags: ArcFlags,
 }
 
 impl<S: Scalar> Arc<S> {
@@ -100,7 +96,11 @@ impl<S: Scalar> Arc<S> {
         debug_assert_ne!(sum_of_sq, S::ZERO);
 
         // F6.5.2
-        let sign_coe = if arc.flags.large_arc == arc.flags.sweep {-S::ONE } else { S::ONE };
+        let sign_coe = if arc.flags.large_arc == arc.flags.sweep {
+            -S::ONE
+        } else {
+            S::ONE
+        };
         let coe = sign_coe * S::sqrt(S::abs((rxry * rxry - sum_of_sq) / sum_of_sq));
         let transformed_cx = coe * rxpy / ry;
         let transformed_cy = -coe * rypx / rx;
@@ -108,17 +108,11 @@ impl<S: Scalar> Arc<S> {
         // F6.5.3
         let center = point(
             cos_phi * transformed_cx - sin_phi * transformed_cy + hs_x,
-            sin_phi * transformed_cx + cos_phi * transformed_cy + hs_y
+            sin_phi * transformed_cx + cos_phi * transformed_cy + hs_y,
         );
 
-        let start_v: Vector<S> = vector(
-            (p.x - transformed_cx) / rx,
-            (p.y - transformed_cy) / ry,
-        );
-        let end_v: Vector<S> = vector(
-            (-p.x - transformed_cx) / rx,
-            (-p.y - transformed_cy) / ry,
-        );
+        let start_v: Vector<S> = vector((p.x - transformed_cx) / rx, (p.y - transformed_cy) / ry);
+        let end_v: Vector<S> = vector((-p.x - transformed_cx) / rx, (-p.y - transformed_cy) / ry);
 
         let two_pi = S::TWO * S::PI();
 
@@ -137,7 +131,7 @@ impl<S: Scalar> Arc<S> {
             radii: vector(rx, ry),
             start_angle,
             sweep_angle: Angle::radians(sweep_angle),
-            x_rotation: arc.x_rotation
+            x_rotation: arc.x_rotation,
         }
     }
 
@@ -162,7 +156,7 @@ impl<S: Scalar> Arc<S> {
     #[inline]
     pub fn for_each_quadratic_bezier<F>(&self, cb: &mut F)
     where
-        F: FnMut(&QuadraticBezierSegment<S>)
+        F: FnMut(&QuadraticBezierSegment<S>),
     {
         arc_to_quadratic_beziers(self, cb);
     }
@@ -171,7 +165,7 @@ impl<S: Scalar> Arc<S> {
     #[inline]
     pub fn for_each_cubic_bezier<F>(&self, cb: &mut F)
     where
-        F: FnMut(&CubicBezierSegment<S>)
+        F: FnMut(&CubicBezierSegment<S>),
     {
         arc_to_cubic_beziers(self, cb);
     }
@@ -184,10 +178,14 @@ impl<S: Scalar> Arc<S> {
     }
 
     #[inline]
-    pub fn x(&self, t: S) -> S { self.sample(t).x }
+    pub fn x(&self, t: S) -> S {
+        self.sample(t).x
+    }
 
     #[inline]
-    pub fn y(&self, t: S) -> S { self.sample(t).y }
+    pub fn y(&self, t: S) -> S {
+        self.sample(t).y
+    }
 
     /// Sample the curve's tangent at t (expecting t between 0 and 1).
     #[inline]
@@ -280,20 +278,56 @@ impl<S: Scalar> Arc<S> {
     /// Swap the direction of the segment.
     pub fn flip(&self) -> Self {
         let mut arc = *self;
-        arc.start_angle = arc.start_angle + self.sweep_angle;
+        arc.start_angle += self.sweep_angle;
         arc.sweep_angle = -self.sweep_angle;
 
         arc
     }
 
     /// Approximates the arc with a sequence of line segments.
-    pub fn for_each_flattened<F: FnMut(Point<S>)>(&self, tolerance: S, call_back: &mut F) {
-        <Self as FlattenedForEach>::for_each_flattened(self, tolerance, call_back);
+    pub fn for_each_flattened<F>(&self, tolerance: S, callback: &mut F)
+    where
+        F: FnMut(Point<S>),
+    {
+        let mut iter = self.clone();
+        loop {
+            let t = iter.flattening_step(tolerance);
+            if t >= S::ONE {
+                break;
+            }
+            iter = iter.after_split(t);
+            callback(iter.from());
+        }
+
+        callback(iter.to());
+    }
+
+    /// Iterates through the curve invoking a callback at each point.
+    pub fn for_each_flattened_with_t<F>(&self, tolerance: S, callback: &mut F)
+    where
+        F: FnMut(Point<S>, S),
+    {
+        let end = self.to();
+        let mut iter = self.clone();
+        let mut t0 = S::ZERO;
+        loop {
+            let step = iter.flattening_step(tolerance);
+
+            if step >= S::ONE {
+                break;
+            }
+    
+            iter = iter.after_split(step);
+            t0 += step * (S::ONE - t0);
+            callback(iter.from(), t0);
+        }
+
+        callback(end, S::ONE);
     }
 
     /// Finds the interval of the beginning of the curve that can be approximated with a
     /// line segment.
-    pub fn flattening_step(&self, tolerance: S) -> S {
+    fn flattening_step(&self, tolerance: S) -> S {
         // cos(theta) = (r - tolerance) / r
         // angle = 2 * theta
         // s = angle / sweep
@@ -319,12 +353,10 @@ impl<S: Scalar> Arc<S> {
 
     /// Returns a conservative rectangle that contains the curve.
     pub fn fast_bounding_rect(&self) -> Rect<S> {
-        Transform2D::create_rotation(self.x_rotation).transform_rect(
-            &Rect::new(
-                self.center - self.radii,
-                self.radii.to_size() * S::TWO
-            )
-        )
+        Transform::create_rotation(self.x_rotation).transform_rect(&Rect::new(
+            self.center - self.radii,
+            self.radii.to_size() * S::TWO,
+        ))
     }
 
     /// Returns a conservative rectangle that contains the curve.
@@ -333,12 +365,12 @@ impl<S: Scalar> Arc<S> {
         let to = self.to();
         let mut min = Point::min(from, to);
         let mut max = Point::max(from, to);
-        self.for_each_local_x_extremum_t(&mut|t| {
+        self.for_each_local_x_extremum_t(&mut |t| {
             let p = self.sample(t);
             min.x = S::min(min.x, p.x);
             max.x = S::max(max.x, p.x);
         });
-        self.for_each_local_y_extremum_t(&mut|t| {
+        self.for_each_local_y_extremum_t(&mut |t| {
             let p = self.sample(t);
             min.y = S::min(min.y, p.y);
             max.y = S::max(max.y, p.y);
@@ -351,7 +383,9 @@ impl<S: Scalar> Arc<S> {
     }
 
     pub fn for_each_local_x_extremum_t<F>(&self, cb: &mut F)
-    where F: FnMut(S) {
+    where
+        F: FnMut(S),
+    {
         let rx = self.radii.x;
         let ry = self.radii.y;
         let a1 = Angle::radians(-S::atan(ry * Float::tan(self.x_rotation.radians) / rx));
@@ -361,7 +395,9 @@ impl<S: Scalar> Arc<S> {
     }
 
     pub fn for_each_local_y_extremum_t<F>(&self, cb: &mut F)
-    where F: FnMut(S) {
+    where
+        F: FnMut(S),
+    {
         let rx = self.radii.x;
         let ry = self.radii.y;
         let a1 = Angle::radians(S::atan(ry / (Float::tan(self.x_rotation.radians) * rx)));
@@ -371,7 +407,9 @@ impl<S: Scalar> Arc<S> {
     }
 
     fn for_each_extremum_inner<F>(&self, a1: Angle<S>, a2: Angle<S>, cb: &mut F)
-    where F: FnMut(S) {
+    where
+        F: FnMut(S),
+    {
         let sweep = self.sweep_angle.radians;
         let abs_sweep = S::abs(sweep);
         let sign = S::signum(sweep);
@@ -390,7 +428,7 @@ impl<S: Scalar> Arc<S> {
             if a2 < abs_sweep {
                 cb(a2 / abs_sweep);
             }
-        } else  {
+        } else {
             if a1 > two_pi - abs_sweep {
                 cb(a1 / abs_sweep);
             }
@@ -421,25 +459,37 @@ impl<S: Scalar> Arc<S> {
     }
 
     pub fn approximate_length(&self, tolerance: S) -> S {
-        segment::approximate_length_from_flattening(self, tolerance)
+        let mut from = self.from();
+        let mut len = S::ZERO;
+        self.for_each_flattened(tolerance, &mut |to| {
+            len += (to - from).length();
+            from = to;
+        });
+
+        len
     }
 
     #[inline]
     fn tangent_at_angle(&self, angle: Angle<S>) -> Vector<S> {
         let a = angle.get();
-        Rotation2D::new(self.x_rotation).transform_vector(
-            &vector(-self.radii.x * Float::sin(a), self.radii.y * Float::cos(a))
-        )
+        Rotation::new(self.x_rotation).transform_vector(vector(
+            -self.radii.x * Float::sin(a),
+            self.radii.y * Float::cos(a),
+        ))
     }
 }
 
 impl<S: Scalar> Into<Arc<S>> for SvgArc<S> {
-    fn into(self) -> Arc<S> { self.to_arc() }
+    fn into(self) -> Arc<S> {
+        self.to_arc()
+    }
 }
 
 impl<S: Scalar> SvgArc<S> {
     /// Converts this arc from endpoints to center notation.
-    pub fn to_arc(&self) -> Arc<S> { Arc::from_svg_arc(self) }
+    pub fn to_arc(&self) -> Arc<S> {
+        Arc::from_svg_arc(self)
+    }
 
     /// Per SVG spec, this arc should be rendered as a line_to segment.
     ///
@@ -453,10 +503,10 @@ impl<S: Scalar> SvgArc<S> {
     /// Approximates the arc with a sequence of quadratic bézier segments.
     pub fn for_each_quadratic_bezier<F>(&self, cb: &mut F)
     where
-        F: FnMut(&QuadraticBezierSegment<S>)
+        F: FnMut(&QuadraticBezierSegment<S>),
     {
         if self.is_straight_line() {
-            cb(&QuadraticBezierSegment{
+            cb(&QuadraticBezierSegment {
                 from: self.from,
                 ctrl: self.from,
                 to: self.to,
@@ -470,7 +520,7 @@ impl<S: Scalar> SvgArc<S> {
     /// Approximates the arc with a sequence of cubic bézier segments.
     pub fn for_each_cubic_bezier<F>(&self, cb: &mut F)
     where
-        F: FnMut(&CubicBezierSegment<S>)
+        F: FnMut(&CubicBezierSegment<S>),
     {
         if self.is_straight_line() {
             cb(&CubicBezierSegment {
@@ -497,10 +547,29 @@ impl<S: Scalar> SvgArc<S> {
 }
 
 /// Flag parameters for arcs as described by the SVG specification.
+///
+/// For most situations using the SVG arc notation, there are four different arcs
+/// (two different ellipses, each with two different arc sweeps) that satisfy the
+/// arc parameters. The `large_arc` and `sweep` flags indicate which one of the
+/// four arcs are drawn, as follows:
+///
+/// See more examples in the [SVG specification](https://svgwg.org/specs/paths/)
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct ArcFlags {
+    /// Of the four candidate arc sweeps, two will represent an arc sweep of greater
+    /// than or equal to 180 degrees (the "large-arc"), and two will represent an arc
+    /// sweep of less than or equal to 180 degrees (the "small arc"). If `large_arc`
+    /// is `true`, then one of the two larger arc sweeps will be chosen; otherwise, if
+    /// `large_arc` is `false`, one of the smaller arc sweeps will be chosen.
     pub large_arc: bool,
+    /// If `sweep` is `true`, then the arc will be drawn in a "positive-angle" direction
+    /// (the ellipse formula `x=cx+rx*cos(theta)` and `y=cy+ry*sin(theta)` is evaluated
+    /// such that theta starts at an angle corresponding to the current point and increases
+    /// positively until the arc reaches the destination position). A value of `false`
+    /// causes the arc to be drawn in a "negative-angle" direction (theta starts at an
+    /// angle value corresponding to the current point and decreases until the arc reaches
+    /// the destination position).
     pub sweep: bool,
 }
 
@@ -513,13 +582,10 @@ impl Default for ArcFlags {
     }
 }
 
-fn arc_to_quadratic_beziers<S, F>(
-    arc: &Arc<S>,
-    callback: &mut F,
-)
+fn arc_to_quadratic_beziers<S, F>(arc: &Arc<S>, callback: &mut F)
 where
     S: Scalar,
-    F: FnMut(&QuadraticBezierSegment<S>)
+    F: FnMut(&QuadraticBezierSegment<S>),
 {
     let sign = arc.sweep_angle.get().signum();
     let sweep_angle = S::abs(arc.sweep_angle.get()).min(S::PI() * S::TWO);
@@ -529,27 +595,30 @@ where
 
     for i in 0..cast::<S, i32>(n_steps).unwrap() {
         let a1 = arc.start_angle + step * cast(i).unwrap();
-        let a2 = arc.start_angle + step * cast(i+1).unwrap();
+        let a2 = arc.start_angle + step * cast(i + 1).unwrap();
 
         let v1 = sample_ellipse(arc.radii, arc.x_rotation, a1).to_vector();
         let v2 = sample_ellipse(arc.radii, arc.x_rotation, a2).to_vector();
         let from = arc.center + v1;
         let to = arc.center + v2;
-        let l1 = Line { point: from, vector: arc.tangent_at_angle(a1) };
-        let l2 = Line { point: to, vector: arc.tangent_at_angle(a2) };
+        let l1 = Line {
+            point: from,
+            vector: arc.tangent_at_angle(a1),
+        };
+        let l2 = Line {
+            point: to,
+            vector: arc.tangent_at_angle(a2),
+        };
         let ctrl = l2.intersection(&l1).unwrap_or(from);
 
-        callback(&QuadraticBezierSegment { from , ctrl, to });
+        callback(&QuadraticBezierSegment { from, ctrl, to });
     }
 }
 
-fn arc_to_cubic_beziers<S, F>(
-    arc: &Arc<S>,
-    callback: &mut F,
-)
+fn arc_to_cubic_beziers<S, F>(arc: &Arc<S>, callback: &mut F)
 where
     S: Scalar,
-    F: FnMut(&CubicBezierSegment<S>)
+    F: FnMut(&CubicBezierSegment<S>),
 {
     let sign = arc.sweep_angle.get().signum();
     let sweep_angle = S::abs(arc.sweep_angle.get()).min(S::PI() * S::TWO);
@@ -559,7 +628,7 @@ where
 
     for i in 0..cast::<S, i32>(n_steps).unwrap() {
         let a1 = arc.start_angle + step * cast(i).unwrap();
-        let a2 = arc.start_angle + step * cast(i+1).unwrap();
+        let a2 = arc.start_angle + step * cast(i + 1).unwrap();
 
         let v1 = sample_ellipse(arc.radii, arc.x_rotation, a1).to_vector();
         let v2 = sample_ellipse(arc.radii, arc.x_rotation, a2).to_vector();
@@ -576,29 +645,57 @@ where
         let ctrl1 = from + arc.tangent_at_angle(a1) * alpha;
         let ctrl2 = to - arc.tangent_at_angle(a2) * alpha;
 
-        callback(&CubicBezierSegment { from , ctrl1, ctrl2, to });
+        callback(&CubicBezierSegment {
+            from,
+            ctrl1,
+            ctrl2,
+            to,
+        });
     }
 }
 
 fn sample_ellipse<S: Scalar>(radii: Vector<S>, x_rotation: Angle<S>, angle: Angle<S>) -> Point<S> {
-    Rotation2D::new(x_rotation).transform_point(
-        &point(radii.x * Float::cos(angle.get()), radii.y * Float::sin(angle.get()))
-    )
+    Rotation::new(x_rotation).transform_point(point(
+        radii.x * Float::cos(angle.get()),
+        radii.y * Float::sin(angle.get()),
+    ))
 }
 
 impl<S: Scalar> Segment for Arc<S> {
     type Scalar = S;
-    fn from(&self) -> Point<S> { self.from() }
-    fn to(&self) -> Point<S> { self.to() }
-    fn sample(&self, t: S) -> Point<S> { self.sample(t) }
-    fn x(&self, t: S) -> S { self.x(t) }
-    fn y(&self, t: S) -> S { self.y(t) }
-    fn derivative(&self, t: S) -> Vector<S> { self.sample_tangent(t) }
-    fn split_range(&self, t_range: Range<S>) -> Self { self.split_range(t_range) }
-    fn split(&self, t: S) -> (Self, Self) { self.split(t) }
-    fn before_split(&self, t: S) -> Self { self.before_split(t) }
-    fn after_split(&self, t: S) -> Self { self.after_split(t) }
-    fn flip(&self) -> Self { self.flip() }
+    fn from(&self) -> Point<S> {
+        self.from()
+    }
+    fn to(&self) -> Point<S> {
+        self.to()
+    }
+    fn sample(&self, t: S) -> Point<S> {
+        self.sample(t)
+    }
+    fn x(&self, t: S) -> S {
+        self.x(t)
+    }
+    fn y(&self, t: S) -> S {
+        self.y(t)
+    }
+    fn derivative(&self, t: S) -> Vector<S> {
+        self.sample_tangent(t)
+    }
+    fn split_range(&self, t_range: Range<S>) -> Self {
+        self.split_range(t_range)
+    }
+    fn split(&self, t: S) -> (Self, Self) {
+        self.split(t)
+    }
+    fn before_split(&self, t: S) -> Self {
+        self.before_split(t)
+    }
+    fn after_split(&self, t: S) -> Self {
+        self.after_split(t)
+    }
+    fn flip(&self) -> Self {
+        self.flip()
+    }
     fn approximate_length(&self, tolerance: S) -> S {
         self.approximate_length(tolerance)
     }
@@ -606,26 +703,73 @@ impl<S: Scalar> Segment for Arc<S> {
 
 impl<S: Scalar> BoundingRect for Arc<S> {
     type Scalar = S;
-    fn bounding_rect(&self) -> Rect<S> { self.bounding_rect() }
-    fn fast_bounding_rect(&self) -> Rect<S> { self.fast_bounding_rect() }
-    fn bounding_range_x(&self) -> (S, S) { self.bounding_range_x() }
-    fn bounding_range_y(&self) -> (S, S) { self.bounding_range_y() }
-    fn fast_bounding_range_x(&self) -> (S, S) { self.fast_bounding_range_x() }
-    fn fast_bounding_range_y(&self) -> (S, S) { self.fast_bounding_range_y() }
+    fn bounding_rect(&self) -> Rect<S> {
+        self.bounding_rect()
+    }
+    fn fast_bounding_rect(&self) -> Rect<S> {
+        self.fast_bounding_rect()
+    }
+    fn bounding_range_x(&self) -> (S, S) {
+        self.bounding_range_x()
+    }
+    fn bounding_range_y(&self) -> (S, S) {
+        self.bounding_range_y()
+    }
+    fn fast_bounding_range_x(&self) -> (S, S) {
+        self.fast_bounding_range_x()
+    }
+    fn fast_bounding_range_y(&self) -> (S, S) {
+        self.fast_bounding_range_y()
+    }
 }
 
-impl<S: Scalar> FlatteningStep for Arc<S> {
-    fn flattening_step(&self, tolerance: S) -> S {
-        self.flattening_step(tolerance)
+/// Flattening iterator for arcs.
+///
+/// The iterator starts at the first point *after* the origin of the curve and ends at the
+/// destination.
+pub struct Flattened<S> {
+    arc: Arc<S>,
+    tolerance: S,
+    done: bool,
+}
+
+impl<S: Scalar> Flattened<S> {
+    pub(crate) fn new(arc: Arc<S>, tolerance: S) -> Self {
+        assert!(tolerance > S::ZERO);
+        Flattened {
+            arc,
+            tolerance,
+            done: false,
+        }
+    }
+}
+impl<S: Scalar> Iterator for Flattened<S> {
+    type Item = Point<S>;
+    fn next(&mut self) -> Option<Point<S>> {
+        if self.done {
+            return None;
+        }
+
+        let t = self.arc.flattening_step(self.tolerance);
+        if t >= S::ONE {
+            self.done = true;
+            return Some(self.arc.to());
+        }
+        self.arc = self.arc.after_split(t);
+
+        Some(self.arc.from())
     }
 }
 
 #[test]
 fn test_from_svg_arc() {
+    use crate::vector;
     use euclid::approxeq::ApproxEq;
-    use crate::math::vector;
 
-    let flags = ArcFlags { large_arc: false, sweep: false };
+    let flags = ArcFlags {
+        large_arc: false,
+        sweep: false,
+    };
 
     test_endpoints(&SvgArc {
         from: point(0.0, -10.0),
@@ -706,13 +850,19 @@ fn test_from_svg_arc() {
     fn do_test_endpoints(svg_arc: &SvgArc<f64>) {
         let eps = point(0.01, 0.01);
         let arc = svg_arc.to_arc();
-        assert!(arc.from().approx_eq_eps(&svg_arc.from, &eps),
+        assert!(
+            arc.from().approx_eq_eps(&svg_arc.from, &eps),
             "unexpected arc.from: {:?} == {:?}, flags: {:?}",
-            arc.from(), svg_arc.from, svg_arc.flags,
+            arc.from(),
+            svg_arc.from,
+            svg_arc.flags,
         );
-        assert!(arc.to().approx_eq_eps(&svg_arc.to, &eps),
+        assert!(
+            arc.to().approx_eq_eps(&svg_arc.to, &eps),
             "unexpected arc.from: {:?} == {:?}, flags: {:?}",
-            arc.to(), svg_arc.to, svg_arc.flags,
+            arc.to(),
+            svg_arc.to,
+            svg_arc.flags,
         );
     }
 }
@@ -737,7 +887,7 @@ fn test_to_quadratics_and_cubics() {
         {
             let mut prev = arc.from();
             let mut count = 0;
-            arc.for_each_cubic_bezier(&mut|c| {
+            arc.for_each_cubic_bezier(&mut |c| {
                 assert!(c.from.approx_eq(&prev));
                 prev = c.to;
                 count += 1;
@@ -756,7 +906,7 @@ fn test_to_quadratics_and_cubics() {
             x_rotation: Angle::radians(0.5),
         },
         4,
-        2
+        2,
     );
 
     do_test(
@@ -768,7 +918,7 @@ fn test_to_quadratics_and_cubics() {
             x_rotation: Angle::radians(1.3),
         },
         4,
-        2
+        2,
     );
 
     do_test(
@@ -780,7 +930,7 @@ fn test_to_quadratics_and_cubics() {
             x_rotation: Angle::radians(0.3),
         },
         1,
-        1
+        1,
     );
 
     do_test(
@@ -792,20 +942,21 @@ fn test_to_quadratics_and_cubics() {
             x_rotation: Angle::radians(-0.3),
         },
         1,
-        1
+        1,
     );
 }
 
 #[test]
 fn test_bounding_rect() {
+    use crate::rect;
     use euclid::approxeq::ApproxEq;
-    use crate::math::rect;
 
     fn approx_eq(r1: Rect<f32>, r2: Rect<f32>) -> bool {
-        if !r1.min_x().approx_eq(&r2.min_x()) ||
-           !r1.max_x().approx_eq(&r2.max_x()) ||
-           !r1.min_y().approx_eq(&r2.min_y()) ||
-           !r1.max_y().approx_eq(&r2.max_y()) {
+        if !r1.min_x().approx_eq(&r2.min_x())
+            || !r1.max_x().approx_eq(&r2.max_x())
+            || !r1.min_y().approx_eq(&r2.min_y())
+            || !r1.max_y().approx_eq(&r2.max_y())
+        {
             println!("\n   left: {:?}\n   right: {:?}", r1, r2);
             return false;
         }
@@ -819,7 +970,8 @@ fn test_bounding_rect() {
         start_angle: Angle::radians(0.0),
         sweep_angle: Angle::pi(),
         x_rotation: Angle::zero(),
-    }.bounding_rect();
+    }
+    .bounding_rect();
     assert!(approx_eq(r, rect(-1.0, 0.0, 2.0, 1.0)));
 
     let r = Arc {
@@ -828,7 +980,8 @@ fn test_bounding_rect() {
         start_angle: Angle::radians(0.0),
         sweep_angle: Angle::pi(),
         x_rotation: Angle::pi(),
-    }.bounding_rect();
+    }
+    .bounding_rect();
     assert!(approx_eq(r, rect(-1.0, -1.0, 2.0, 1.0)));
 
     let r = Arc {
@@ -837,7 +990,8 @@ fn test_bounding_rect() {
         start_angle: Angle::radians(0.0),
         sweep_angle: Angle::pi(),
         x_rotation: Angle::pi() * 0.5,
-    }.bounding_rect();
+    }
+    .bounding_rect();
     assert!(approx_eq(r, rect(-1.0, -2.0, 1.0, 4.0)));
 
     let r = Arc {
@@ -846,7 +1000,8 @@ fn test_bounding_rect() {
         start_angle: Angle::pi(),
         sweep_angle: Angle::pi(),
         x_rotation: -Angle::pi() * 0.25,
-    }.bounding_rect();
+    }
+    .bounding_rect();
     assert!(approx_eq(r, rect(0.0, 0.0, 1.707107, 1.707107)));
 
     let mut angle = Angle::zero();
@@ -858,7 +1013,8 @@ fn test_bounding_rect() {
             start_angle: angle,
             sweep_angle: Angle::pi() * 2.0,
             x_rotation: Angle::pi() * 0.25,
-        }.bounding_rect();
+        }
+        .bounding_rect();
         assert!(approx_eq(r, rect(-4.0, -4.0, 8.0, 8.0)));
         angle += Angle::pi() * 2.0 / 10.0;
     }
@@ -872,7 +1028,8 @@ fn test_bounding_rect() {
             start_angle: Angle::zero(),
             sweep_angle: Angle::pi() * 2.0,
             x_rotation: angle,
-        }.bounding_rect();
+        }
+        .bounding_rect();
         assert!(approx_eq(r, rect(-4.0, -4.0, 8.0, 8.0)));
         angle += Angle::pi() * 2.0 / 10.0;
     }
@@ -891,5 +1048,5 @@ fn negative_flattening_step() {
         x_rotation: Angle::zero(),
     };
 
-    arc.for_each_flattened(0.100000001, &mut|_|{});
+    arc.for_each_flattened(0.100000001, &mut |_| {});
 }

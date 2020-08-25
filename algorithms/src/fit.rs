@@ -1,10 +1,9 @@
 //! Fit paths into rectangles.
 
-use crate::math::*;
 use crate::aabb::bounding_rect;
-use crate::path::Path;
+use crate::math::*;
 use crate::path::iterator::*;
-use crate::path::builder::*;
+use crate::path::Path;
 
 /// The strategy to use when fitting (stretching, overflow, etc.)
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -22,10 +21,10 @@ pub enum FitStyle {
 }
 
 /// Computes a transform that fits a rectangle into another one.
-pub fn fit_rectangle(src_rect: &Rect, dst_rect: &Rect, style: FitStyle) -> Transform2D {
+pub fn fit_rectangle(src_rect: &Rect, dst_rect: &Rect, style: FitStyle) -> Transform {
     let scale: Vector = vector(
         dst_rect.size.width / src_rect.size.width,
-        dst_rect.size.height / src_rect.size.height
+        dst_rect.size.height / src_rect.size.height,
     );
 
     let scale = match style {
@@ -42,10 +41,10 @@ pub fn fit_rectangle(src_rect: &Rect, dst_rect: &Rect, style: FitStyle) -> Trans
         FitStyle::Vertical => vector(scale.y, scale.y),
     };
 
-    let src_center = src_rect.origin.lerp(src_rect.bottom_right(), 0.5);
-    let dst_center = dst_rect.origin.lerp(dst_rect.bottom_right(), 0.5);
+    let src_center = src_rect.origin.lerp(src_rect.max(), 0.5);
+    let dst_center = dst_rect.origin.lerp(dst_rect.max(), 0.5);
 
-    Transform2D::create_translation(-src_center.x, -src_center.y)
+    Transform::create_translation(-src_center.x, -src_center.y)
         .post_scale(scale.x, scale.y)
         .post_translate(dst_center.to_vector())
 }
@@ -67,7 +66,7 @@ pub fn fit_path(path: &Path, output_rect: &Rect, style: FitStyle) -> Path {
 fn simple_fit() {
     fn approx_eq(a: &Rect, b: &Rect) -> bool {
         use crate::geom::euclid::approxeq::ApproxEq;
-        let result = a.origin.approx_eq(&b.origin) && a.bottom_right().approx_eq(&b.bottom_right());
+        let result = a.origin.approx_eq(&b.origin) && a.max().approx_eq(&b.max());
         if !result {
             println!("{:?} == {:?}", a, b);
         }
@@ -77,7 +76,7 @@ fn simple_fit() {
     let t = fit_rectangle(
         &rect(0.0, 0.0, 1.0, 1.0),
         &rect(0.0, 0.0, 2.0, 2.0),
-        FitStyle::Stretch
+        FitStyle::Stretch,
     );
 
     assert!(approx_eq(
@@ -88,7 +87,7 @@ fn simple_fit() {
     let t = fit_rectangle(
         &rect(1.0, 2.0, 4.0, 4.0),
         &rect(0.0, 0.0, 2.0, 8.0),
-        FitStyle::Stretch
+        FitStyle::Stretch,
     );
 
     assert!(approx_eq(
@@ -99,7 +98,7 @@ fn simple_fit() {
     let t = fit_rectangle(
         &rect(1.0, 2.0, 2.0, 4.0),
         &rect(0.0, 0.0, 2.0, 2.0),
-        FitStyle::Horizontal
+        FitStyle::Horizontal,
     );
 
     assert!(approx_eq(
@@ -110,7 +109,7 @@ fn simple_fit() {
     let t = fit_rectangle(
         &rect(1.0, 2.0, 2.0, 2.0),
         &rect(0.0, 0.0, 4.0, 2.0),
-        FitStyle::Horizontal
+        FitStyle::Horizontal,
     );
 
     assert!(approx_eq(
@@ -118,4 +117,3 @@ fn simple_fit() {
         &rect(0.0, -1.0, 4.0, 4.0)
     ));
 }
-

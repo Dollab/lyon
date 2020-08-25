@@ -5,22 +5,24 @@
 
 use crate::math::*;
 use crate::path::{Path, PathEvent};
-use crate::path::builder::*;
-use crate::geom::LineSegment;
-use std::u16;
+use crate::path::polygon::Polygon;
+use sid::{Id, IdRange, IdSlice, IdVec};
 use std::ops;
-use sid::{Id, IdRange, IdVec, IdSlice};
+use std::u16;
 
-#[doc(hidden)] pub struct EdgeTag;
+#[doc(hidden)]
+pub struct EdgeTag;
 pub type EdgeId = Id<EdgeTag, u16>;
 pub type EdgeIdRange = IdRange<EdgeTag, u16>;
 
-#[doc(hidden)] pub struct VertexTag;
+#[doc(hidden)]
+pub struct VertexTag;
 pub type VertexId = Id<VertexTag, u16>;
 pub type VertexIdRange = IdRange<VertexTag, u16>;
 pub type VertexSlice<'l, T> = IdSlice<'l, VertexId, T>;
 
-#[doc(hidden)] pub struct SubPathTag;
+#[doc(hidden)]
+pub struct SubPathTag;
 pub type SubPathId = Id<SubPathTag, u16>;
 pub type SubPathIdRange = IdRange<SubPathTag, u16>;
 
@@ -57,17 +59,17 @@ impl AdvancedPath {
     }
 
     /// Add a sub-path from a polyline.
-    pub fn add_polyline(&mut self, points: &[Point], is_closed: bool) -> SubPathId {
-        let len = points.len() as u16;
+    pub fn add_polygon(&mut self, polygon: Polygon<Point>) -> SubPathId {
+        let len = polygon.points.len() as u16;
         let base = self.edges.len();
         let base_vertex = self.points.len();
         let sub_path = self.sub_paths.push(SubPath {
             first_edge: EdgeId::new(base),
-            is_closed,
+            is_closed: polygon.closed,
         });
-        for (i, point) in points.iter().enumerate() {
+        for (i, point) in polygon.points.iter().enumerate() {
             let i = i as u16;
-            let prev = EdgeId::new(base + if i > 0 { i -  1 } else { len - 1 });
+            let prev = EdgeId::new(base + if i > 0 { i - 1 } else { len - 1 });
             let next = EdgeId::new(base + if i < len - 1 { i + 1 } else { 0 });
             self.edges.push(EdgeInfo {
                 prev,
@@ -83,15 +85,12 @@ impl AdvancedPath {
 
     /// Add a rectangular sub-path.
     pub fn add_rectangle(&mut self, rectangle: &Rect) -> SubPathId {
-        self.add_polyline(
-            &[
-                rectangle.origin,
-                rectangle.top_right(),
-                rectangle.bottom_right(),
-                rectangle.bottom_left(),
-            ],
-            true
-        )
+        let min = rectangle.min();
+        let max = rectangle.min();
+        self.add_polygon(Polygon {
+            points: &[min, point(max.x, min.y), max, point(min.x, max.y)],
+            closed: true,
+        })
     }
 
     /// Returns an object that can circle around the edges of a sub-path.
@@ -236,7 +235,6 @@ impl AdvancedPath {
         // n: new edge
         // o: new opposite edge
 
-
         let sub_path = self.edges[e1].sub_path;
         let e1_next = self.edges[e1].next;
         let e2_prev = self.edges[e2].prev;
@@ -247,13 +245,13 @@ impl AdvancedPath {
             next: e2,
             prev: e1,
             sub_path,
-            vertex: v1
+            vertex: v1,
         });
         let new_opposite_edge = self.edges.push(EdgeInfo {
             next: e1_next,
             prev: e2_prev,
             sub_path,
-            vertex: v2
+            vertex: v2,
         });
 
         self.edges[e1].next = new_edge;
@@ -321,7 +319,7 @@ impl AdvancedPath {
     ) {
         for sp in self.sub_path_ids() {
             if selection.sub_path(self, sp) {
-                self.sub_path_edges(sp).for_each(&mut|edge_id| {
+                self.sub_path_edges(sp).for_each(&mut |edge_id| {
                     callback(self, sp, edge_id);
                 });
             }
@@ -372,7 +370,7 @@ impl ops::Index<VertexId> for AdvancedPath {
 pub struct EdgeLoop<'l> {
     current: EdgeId,
     first: EdgeId,
-    path: &'l AdvancedPath
+    path: &'l AdvancedPath,
 }
 
 // TODO: EdgeLoop should ignore the last edge for a non closed, path or provide
@@ -394,13 +392,19 @@ impl<'l> EdgeLoop<'l> {
     }
 
     /// Returns the current edge id.
-    pub fn current(&self) -> EdgeId { self.current }
+    pub fn current(&self) -> EdgeId {
+        self.current
+    }
 
     /// Returns the first edge id of this edge loop.
-    pub fn first(&self) -> EdgeId { self.first }
+    pub fn first(&self) -> EdgeId {
+        self.first
+    }
 
     /// Returns the borrowed path.
-    pub fn path(&self) -> &'l AdvancedPath { self.path }
+    pub fn path(&self) -> &'l AdvancedPath {
+        self.path
+    }
 
     /// Creates a new edge loop that starts at the current edge.
     pub fn loop_from_here(&self) -> Self {
@@ -434,13 +438,14 @@ impl<'l> EdgeLoop<'l> {
     }
 
     /// Returns an iterator over the `PathEvent`s of this sub-path.
-    pub fn path_iter(&self) ->  SubPathIter {
+    pub fn path_iter(&self) -> SubPathIter {
         let sp = self.path.edges[self.current].sub_path;
         SubPathIter {
             edge_loop: self.clone(),
             prev: point(0.0, 0.0),
             first: point(0.0, 0.0),
             start: true,
+            end: false,
             done: false,
             close: self.path.sub_paths[sp].is_closed,
         }
@@ -450,7 +455,7 @@ impl<'l> EdgeLoop<'l> {
 pub struct MutEdgeLoop<'l> {
     current: EdgeId,
     first: EdgeId,
-    path: &'l mut AdvancedPath
+    path: &'l mut AdvancedPath,
 }
 
 impl<'l> MutEdgeLoop<'l> {
@@ -469,13 +474,19 @@ impl<'l> MutEdgeLoop<'l> {
     }
 
     /// Returns the current edge id.
-    pub fn current(&self) -> EdgeId { self.current }
+    pub fn current(&self) -> EdgeId {
+        self.current
+    }
 
     /// Returns the first edge id of this edge loop.
-    pub fn first(&self) -> EdgeId { self.first }
+    pub fn first(&self) -> EdgeId {
+        self.first
+    }
 
     /// Returns the borrowed path.
-    pub fn path(&mut self) -> &mut AdvancedPath { self.path }
+    pub fn path(&mut self) -> &mut AdvancedPath {
+        self.path
+    }
 
     /// Invokes a callback for each edge id from the current one to the last edge of
     /// of the loop included.
@@ -501,7 +512,7 @@ impl<'l> MutEdgeLoop<'l> {
 }
 
 /// Iterates over the edges around a sub-path.
-pub struct EdgeIdLoop<'l,> {
+pub struct EdgeIdLoop<'l> {
     path: &'l AdvancedPath,
     current_edge: EdgeId,
     last_edge: EdgeId,
@@ -532,11 +543,15 @@ pub trait SubPathSelection {
 /// Selects all sub paths of an `AdvancedPath`.
 pub struct AllSubPaths;
 impl SubPathSelection for AllSubPaths {
-    fn sub_path(&self, _p: &AdvancedPath, _sp: SubPathId) -> bool { true }
+    fn sub_path(&self, _p: &AdvancedPath, _sp: SubPathId) -> bool {
+        true
+    }
 }
 
 impl SubPathSelection for SubPathId {
-    fn sub_path(&self, _p: &AdvancedPath, sp: SubPathId) -> bool { sp == *self }
+    fn sub_path(&self, _p: &AdvancedPath, sp: SubPathId) -> bool {
+        sp == *self
+    }
 }
 
 impl SubPathSelection for SubPathIdRange {
@@ -551,6 +566,7 @@ pub struct SubPathIter<'l> {
     prev: Point,
     first: Point,
     start: bool,
+    end: bool,
     done: bool,
     close: bool,
 }
@@ -558,21 +574,22 @@ pub struct SubPathIter<'l> {
 impl<'l> Iterator for SubPathIter<'l> {
     type Item = PathEvent;
     fn next(&mut self) -> Option<PathEvent> {
-        if self.done {
-            if self.close {
-                self.close = false;
-                return Some(PathEvent::Close(LineSegment {
-                    from: self.prev,
-                    to: self.first
-                }));
+        if self.end {
+            if self.done {
+                return None;
             }
 
-            return None;
+            self.done = true;
+            return Some(PathEvent::End {
+                last: self.prev,
+                first: self.first,
+                close: self.close,
+            });
         }
 
         let edge = self.edge_loop.current();
 
-        self.done = !self.edge_loop.move_forward();
+        self.end = !self.edge_loop.move_forward();
 
         let path = self.edge_loop.path();
         let vertex = path.edges[edge].vertex;
@@ -583,10 +600,10 @@ impl<'l> Iterator for SubPathIter<'l> {
         if self.start {
             self.start = false;
             self.first = to;
-            return Some(PathEvent::MoveTo(to));
+            return Some(PathEvent::Begin { at: to });
         }
 
-        return Some(PathEvent::Line(LineSegment { from, to }));
+        return Some(PathEvent::Line { from, to });
     }
 }
 
@@ -686,42 +703,71 @@ impl<'l> Drop for SubPathBuilder<'l> {
     }
 }
 
-
 #[test]
 fn polyline_to_path() {
     let mut path = AdvancedPath::new();
-    let sp = path.add_polyline(
-        &[
+    let sp = path.add_polygon(Polygon {
+        points: &[
             point(0.0, 0.0),
             point(1.0, 0.0),
             point(1.0, 1.0),
             point(0.0, 1.0),
         ],
-        true,
-    );
+        closed: true,
+    });
 
     let events: Vec<PathEvent> = path.sub_path_edges(sp).path_iter().collect();
 
-    assert_eq!(events[0], PathEvent::MoveTo(point(0.0, 0.0)));
-    assert_eq!(events[1], PathEvent::Line(LineSegment { from: point(0.0, 0.0), to: point(1.0, 0.0) }));
-    assert_eq!(events[2], PathEvent::Line(LineSegment { from: point(1.0, 0.0), to: point(1.0, 1.0) }));
-    assert_eq!(events[3], PathEvent::Line(LineSegment { from: point(1.0, 1.0), to: point(0.0, 1.0) }));
-    assert_eq!(events[4], PathEvent::Close(LineSegment { from: point(0.0, 1.0), to: point(0.0, 0.0) }));
+    assert_eq!(
+        events[0],
+        PathEvent::Begin {
+            at: point(0.0, 0.0)
+        }
+    );
+    assert_eq!(
+        events[1],
+        PathEvent::Line {
+            from: point(0.0, 0.0),
+            to: point(1.0, 0.0)
+        }
+    );
+    assert_eq!(
+        events[2],
+        PathEvent::Line {
+            from: point(1.0, 0.0),
+            to: point(1.0, 1.0)
+        }
+    );
+    assert_eq!(
+        events[3],
+        PathEvent::Line {
+            from: point(1.0, 1.0),
+            to: point(0.0, 1.0)
+        }
+    );
+    assert_eq!(
+        events[4],
+        PathEvent::End {
+            last: point(0.0, 1.0),
+            first: point(0.0, 0.0),
+            close: true
+        }
+    );
     assert_eq!(events.len(), 5);
 }
 
 #[test]
 fn split_edge() {
     let mut path = AdvancedPath::new();
-    let sp = path.add_polyline(
-        &[
+    let sp = path.add_polygon(Polygon {
+        points: &[
             point(0.0, 0.0),
             point(1.0, 0.0),
             point(1.0, 1.0),
             point(0.0, 1.0),
         ],
-        true,
-    );
+        closed: true,
+    });
 
     let mut edge_id = None;
     for id in path.edge_id_loop(path.sub_paths[sp].first_edge) {
@@ -733,12 +779,48 @@ fn split_edge() {
     path.split_edge(edge_id.unwrap(), point(0.5, 0.0));
 
     let events: Vec<PathEvent> = path.sub_path_edges(sp).path_iter().collect();
-    assert_eq!(events[0], PathEvent::MoveTo(point(0.0, 0.0)));
-    assert_eq!(events[1], PathEvent::Line(LineSegment { from: point(0.0, 0.0), to: point(0.5, 0.0) }));
-    assert_eq!(events[2], PathEvent::Line(LineSegment { from: point(0.5, 0.0), to: point(1.0, 0.0) }));
-    assert_eq!(events[3], PathEvent::Line(LineSegment { from: point(1.0, 0.0), to: point(1.0, 1.0) }));
-    assert_eq!(events[4], PathEvent::Line(LineSegment { from: point(1.0, 1.0), to: point(0.0, 1.0) }));
-    assert_eq!(events[5], PathEvent::Close(LineSegment { from: point(0.0, 1.0), to: point(0.0, 0.0) }));
+    assert_eq!(
+        events[0],
+        PathEvent::Begin {
+            at: point(0.0, 0.0)
+        }
+    );
+    assert_eq!(
+        events[1],
+        PathEvent::Line {
+            from: point(0.0, 0.0),
+            to: point(0.5, 0.0)
+        }
+    );
+    assert_eq!(
+        events[2],
+        PathEvent::Line {
+            from: point(0.5, 0.0),
+            to: point(1.0, 0.0)
+        }
+    );
+    assert_eq!(
+        events[3],
+        PathEvent::Line {
+            from: point(1.0, 0.0),
+            to: point(1.0, 1.0)
+        }
+    );
+    assert_eq!(
+        events[4],
+        PathEvent::Line {
+            from: point(1.0, 1.0),
+            to: point(0.0, 1.0)
+        }
+    );
+    assert_eq!(
+        events[5],
+        PathEvent::End {
+            last: point(0.0, 1.0),
+            first: point(0.0, 0.0),
+            close: true
+        }
+    );
     assert_eq!(events.len(), 6);
 }
 
@@ -756,11 +838,42 @@ fn sub_path_builder() {
     let sp = path.sub_path_ids().start();
     let events: Vec<PathEvent> = path.sub_path_edges(sp).path_iter().collect();
 
-    assert_eq!(events[0], PathEvent::MoveTo(point(0.0, 0.0)));
-    assert_eq!(events[1], PathEvent::Line(LineSegment { from: point(0.0, 0.0), to: point(1.0, 0.0) }));
-    assert_eq!(events[2], PathEvent::Line(LineSegment { from: point(1.0, 0.0), to: point(1.0, 1.0) }));
-    assert_eq!(events[3], PathEvent::Line(LineSegment { from: point(1.0, 1.0), to: point(0.0, 1.0) }));
-    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events[0],
+        PathEvent::Begin {
+            at: point(0.0, 0.0)
+        }
+    );
+    assert_eq!(
+        events[1],
+        PathEvent::Line {
+            from: point(0.0, 0.0),
+            to: point(1.0, 0.0)
+        }
+    );
+    assert_eq!(
+        events[2],
+        PathEvent::Line {
+            from: point(1.0, 0.0),
+            to: point(1.0, 1.0)
+        }
+    );
+    assert_eq!(
+        events[3],
+        PathEvent::Line {
+            from: point(1.0, 1.0),
+            to: point(0.0, 1.0)
+        }
+    );
+    assert_eq!(
+        events[4],
+        PathEvent::End {
+            last: point(0.0, 1.0),
+            first: point(0.0, 0.0),
+            close: false
+        }
+    );
+    assert_eq!(events.len(), 5);
 }
 
 #[test]
@@ -774,42 +887,102 @@ fn empty_sub_path_1() {
     let sp = path.sub_path_ids().start();
     let events: Vec<PathEvent> = path.sub_path_edges(sp).path_iter().collect();
 
-    assert_eq!(events[0], PathEvent::MoveTo(point(0.0, 0.0)));
-    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        PathEvent::Begin {
+            at: point(0.0, 0.0)
+        }
+    );
+    assert_eq!(
+        events[1],
+        PathEvent::End {
+            last: point(0.0, 0.0),
+            first: point(0.0, 0.0),
+            close: false
+        }
+    );
+    assert_eq!(events.len(), 2);
 }
 
 #[test]
 fn empty_sub_path_2() {
     let mut path = AdvancedPath::new();
-    path.add_polyline(&[point(0.0, 0.0)], false);
+    path.add_polygon(Polygon {
+        points: &[point(0.0, 0.0)],
+        closed: false,
+    });
 
     let sp = path.sub_path_ids().start();
     let events: Vec<PathEvent> = path.sub_path_edges(sp).path_iter().collect();
 
-    assert_eq!(events[0], PathEvent::MoveTo(point(0.0, 0.0)));
-    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        PathEvent::Begin {
+            at: point(0.0, 0.0)
+        }
+    );
+    assert_eq!(
+        events[1],
+        PathEvent::End {
+            last: point(0.0, 0.0),
+            first: point(0.0, 0.0),
+            close: false
+        }
+    );
+    assert_eq!(events.len(), 2);
 }
 
 #[test]
 fn invert_sub_path() {
     let mut path = AdvancedPath::new();
-    let sp = path.add_polyline(
-        &[
+    let sp = path.add_polygon(Polygon {
+        points: &[
             point(0.0, 0.0),
             point(1.0, 0.0),
             point(1.0, 1.0),
             point(0.0, 1.0),
         ],
-        false,
-    );
+        closed: false,
+    });
 
     path.invert_sub_path(sp);
 
     let events: Vec<PathEvent> = path.sub_path_edges(sp).path_iter().collect();
 
-    assert_eq!(events[0], PathEvent::MoveTo(point(0.0, 1.0)));
-    assert_eq!(events[1], PathEvent::Line(LineSegment { from: point(0.0, 1.0), to: point(1.0, 1.0) }));
-    assert_eq!(events[2], PathEvent::Line(LineSegment { from: point(1.0, 1.0), to: point(1.0, 0.0) }));
-    assert_eq!(events[3], PathEvent::Line(LineSegment { from: point(1.0, 0.0), to: point(0.0, 0.0) }));
-    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events[0],
+        PathEvent::Begin {
+            at: point(0.0, 1.0)
+        }
+    );
+    assert_eq!(
+        events[1],
+        PathEvent::Line {
+            from: point(0.0, 1.0),
+            to: point(1.0, 1.0)
+        }
+    );
+    assert_eq!(
+        events[2],
+        PathEvent::Line {
+            from: point(1.0, 1.0),
+            to: point(1.0, 0.0)
+        }
+    );
+    assert_eq!(
+        events[3],
+        PathEvent::Line {
+            from: point(1.0, 0.0),
+            to: point(0.0, 0.0)
+        }
+    );
+    assert_eq!(
+        events[4],
+        PathEvent::End {
+            last: point(0.0, 0.0),
+            first: point(0.0, 1.0),
+            close: false
+        }
+    );
+    assert_eq!(events.len(), 5);
 }

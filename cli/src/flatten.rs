@@ -1,6 +1,6 @@
 use commands::PathCmd;
 use lyon::path::iterator::*;
-use lyon::path::FlattenedEvent;
+use lyon::path::PathEvent;
 use std::io;
 
 #[derive(Debug)]
@@ -9,7 +9,9 @@ pub enum FlattenError {
 }
 
 impl ::std::convert::From<::std::io::Error> for FlattenError {
-    fn from(err: io::Error) -> Self { FlattenError::Io(err) }
+    fn from(err: io::Error) -> Self {
+        FlattenError::Io(err)
+    }
 }
 
 pub fn flatten(mut cmd: PathCmd) -> Result<(), FlattenError> {
@@ -23,37 +25,42 @@ pub fn flatten(mut cmd: PathCmd) -> Result<(), FlattenError> {
         let mut num_vertices = 0;
         for event in cmd.path.iter().flattened(cmd.tolerance) {
             match event {
-                FlattenedEvent::MoveTo(_) => {
+                PathEvent::Begin { .. } => {
                     num_vertices += 1;
                     num_paths += 1;
                 }
-                FlattenedEvent::Line(_) => {
+                PathEvent::Line { .. } => {
                     num_vertices += 1;
                 }
-                FlattenedEvent::Close(_) => {}
+                PathEvent::End { .. } => {}
+                _ => {
+                    panic!("Flattening produced curves.");
+                }
             }
         }
 
-        try!{ writeln!(&mut *cmd.output, "vertices: {}", num_vertices) };
-        try!{ writeln!(&mut *cmd.output, "paths: {}", num_paths) };
+        writeln!(&mut *cmd.output, "vertices: {}", num_vertices)?;
+        writeln!(&mut *cmd.output, "paths: {}", num_paths)?;
 
         return Ok(());
     }
 
     for event in cmd.path.iter().flattened(cmd.tolerance) {
         match event {
-            FlattenedEvent::MoveTo(p) => {
-                try!{ write!(&mut *cmd.output, "M {} {} ", p.x, p.y) };
+            PathEvent::Begin { at } => {
+                write!(&mut *cmd.output, "M {} {} ", at.x, at.y)?;
             }
-            FlattenedEvent::Line(segment) => {
-                try!{ write!(&mut *cmd.output, "L {} {} ", segment.to.x, segment.to.y) };
+            PathEvent::Line { to, .. } => {
+                write!(&mut *cmd.output, "L {} {} ", to.x, to.y)?;
             }
-            FlattenedEvent::Close(..) => {
-                try!{ write!(&mut *cmd.output, "Z") };
+            PathEvent::End { close: true, .. } => {
+                write!(&mut *cmd.output, "Z")?;
             }
+            _ => {}
         }
     }
-    try!{ writeln!(&mut *cmd.output, "") };
+
+    writeln!(&mut *cmd.output, "")?;
 
     Ok(())
 }

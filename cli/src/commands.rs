@@ -1,7 +1,7 @@
-use std::io;
+use lyon::algorithms::hatching::{DotOptions, HatchingOptions};
 use lyon::path::Path;
 use lyon::tessellation::{FillOptions, StrokeOptions};
-use lyon::algorithms::hatching::{HatchingOptions, DotOptions};
+use std::io;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Tessellator {
@@ -49,16 +49,15 @@ pub struct RenderCmd {
 
 pub struct PathCmd {
     pub path: Path,
-    pub output: Box<io::Write>,
+    pub output: Box<dyn io::Write>,
     pub tolerance: f32,
     pub count: bool,
     pub flatten: bool,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct FuzzCmd {
-    pub fill: bool,
-    pub stroke: bool,
+    pub tess: TessellateCmd,
     pub min_points: Option<u32>,
     pub max_points: Option<u32>,
     pub tessellator: Tessellator,

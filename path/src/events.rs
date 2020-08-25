@@ -1,163 +1,146 @@
-use crate::geom::{LineSegment, QuadraticBezierSegment, CubicBezierSegment};
-use crate::math::{Point, Vector, Angle, Transform2D, Transform};
-use crate::ArcFlags;
+use crate::geom::traits::Transformation;
+use crate::math::Point;
+use crate::{ControlPointId, EndpointId, Position};
 
-/// Path event enum that can represent all of SVG's path description syntax.
-///
-/// See the SVG specification: https://www.w3.org/TR/SVG/paths.html
-#[derive(Copy, Clone, Debug, PartialEq)]
+/// Represents an event or edge of path.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-pub enum SvgEvent {
-    MoveTo(Point),
-    RelativeMoveTo(Vector),
-    LineTo(Point),
-    RelativeLineTo(Vector),
-    QuadraticTo(Point, Point),
-    RelativeQuadraticTo(Vector, Vector),
-    CubicTo(Point, Point, Point),
-    RelativeCubicTo(Vector, Vector, Vector),
-    /// Elliptic arc represented with the radii, the x axis rotation, arc flags
-    /// and the destination point.
-    ArcTo(Vector, Angle, ArcFlags, Point),
-    /// Elliptic arc represented with the radii, the x axis rotation, arc flags
-    /// and the vector from the current position to the destination point.
-    RelativeArcTo(Vector, Angle, ArcFlags, Vector),
-    HorizontalLineTo(f32),
-    VerticalLineTo(f32),
-    RelativeHorizontalLineTo(f32),
-    RelativeVerticalLineTo(f32),
-    SmoothQuadraticTo(Point),
-    SmoothRelativeQuadraticTo(Vector),
-    SmoothCubicTo(Point, Point),
-    SmoothRelativeCubicTo(Vector, Vector),
-    Close,
+pub enum Event<Endpoint, ControlPoint> {
+    Begin {
+        at: Endpoint,
+    },
+    Line {
+        from: Endpoint,
+        to: Endpoint,
+    },
+    Quadratic {
+        from: Endpoint,
+        ctrl: ControlPoint,
+        to: Endpoint,
+    },
+    Cubic {
+        from: Endpoint,
+        ctrl1: ControlPoint,
+        ctrl2: ControlPoint,
+        to: Endpoint,
+    },
+    End {
+        last: Endpoint,
+        first: Endpoint,
+        close: bool,
+    },
 }
 
-/// Path event enum that represents all operations in absolute coordinates.
-///
-/// Can express the same curves as `SvgEvent` with a simpler representation.
-#[derive(Copy, Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-pub enum PathEvent {
-    MoveTo(Point),
-    Line(LineSegment<f32>),
-    Quadratic(QuadraticBezierSegment<f32>),
-    Cubic(CubicBezierSegment<f32>),
-    Close(LineSegment<f32>),
-}
+/// A path event representing endpoints and control points as positions.
+pub type PathEvent = Event<Point, Point>;
 
-/// Path event enum that can only present quadratic bézier curves and line segments.
-///
-/// Useful for algorithms that approximate all curves with quadratic béziers.
-#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum QuadraticEvent {
-    MoveTo(Point),
-    Line(LineSegment<f32>),
-    Quadratic(QuadraticBezierSegment<f32>),
-    Close(LineSegment<f32>),
-}
+/// A path event representing endpoints and control points as IDs.
+pub type IdEvent = Event<EndpointId, ControlPointId>;
 
-/// Path event enum that can only present line segments.
-///
-/// Useful for algorithms that approximate all curves with line segments.
-#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum FlattenedEvent {
-    MoveTo(Point),
-    Line(LineSegment<f32>),
-    Close(LineSegment<f32>),
-}
-
-impl FlattenedEvent {
-    pub fn to_svg_event(self) -> SvgEvent {
+impl<Ep, Cp> Event<Ep, Cp> {
+    pub fn is_edge(&self) -> bool {
         match self {
-            FlattenedEvent::MoveTo(to) => SvgEvent::MoveTo(to),
-            FlattenedEvent::Line(segment) => SvgEvent::LineTo(segment.to),
-            FlattenedEvent::Close(..) => SvgEvent::Close,
+            &Event::Line { .. }
+            | &Event::Quadratic { .. }
+            | &Event::Cubic { .. }
+            | &Event::End { close: true, .. } => true,
+            _ => false,
         }
     }
 
-    pub fn to_path_event(self) -> PathEvent {
-        match self {
-            FlattenedEvent::MoveTo(to) => PathEvent::MoveTo(to),
-            FlattenedEvent::Line(segment) => PathEvent::Line(segment),
-            FlattenedEvent::Close(segment) => PathEvent::Close(segment),
-        }
-    }
-}
-
-impl Into<PathEvent> for FlattenedEvent {
-    fn into(self) -> PathEvent { self.to_path_event() }
-}
-
-impl Into<SvgEvent> for FlattenedEvent {
-    fn into(self) -> SvgEvent { self.to_svg_event() }
-}
-
-impl QuadraticEvent {
-    pub fn to_svg_event(self) -> SvgEvent {
-        match self {
-            QuadraticEvent::MoveTo(to) => SvgEvent::MoveTo(to),
-            QuadraticEvent::Line(segment) => SvgEvent::LineTo(segment.to),
-            QuadraticEvent::Quadratic(segment) => SvgEvent::QuadraticTo(segment.ctrl, segment.to),
-            QuadraticEvent::Close(..) => SvgEvent::Close,
+    pub fn from(&self) -> Ep
+    where
+        Ep: Clone,
+    {
+        match &self {
+            &Event::Line { from, .. }
+            | &Event::Quadratic { from, .. }
+            | &Event::Cubic { from, .. }
+            | &Event::Begin { at: from }
+            | &Event::End { last: from, .. } => from.clone(),
         }
     }
 
-    pub fn to_path_event(self) -> PathEvent {
+    pub fn to(&self) -> Ep
+    where
+        Ep: Clone,
+    {
+        match &self {
+            &Event::Line { to, .. }
+            | &Event::Quadratic { to, .. }
+            | &Event::Cubic { to, .. }
+            | &Event::Begin { at: to }
+            | &Event::End { first: to, .. } => to.clone(),
+        }
+    }
+
+    pub fn with_points(&self) -> PathEvent
+    where
+        Ep: Position,
+        Cp: Position,
+    {
         match self {
-            QuadraticEvent::MoveTo(to) => PathEvent::MoveTo(to),
-            QuadraticEvent::Line(segment) => PathEvent::Line(segment),
-            QuadraticEvent::Quadratic(segment) => PathEvent::Quadratic(segment),
-            QuadraticEvent::Close(segment) => PathEvent::Close(segment),
+            Event::Line { from, to } => Event::Line {
+                from: from.position(),
+                to: to.position(),
+            },
+            Event::Quadratic { from, ctrl, to } => Event::Quadratic {
+                from: from.position(),
+                ctrl: ctrl.position(),
+                to: to.position(),
+            },
+            Event::Cubic {
+                from,
+                ctrl1,
+                ctrl2,
+                to,
+            } => Event::Cubic {
+                from: from.position(),
+                ctrl1: ctrl1.position(),
+                ctrl2: ctrl2.position(),
+                to: to.position(),
+            },
+            Event::Begin { at } => Event::Begin { at: at.position() },
+            Event::End { last, first, close } => Event::End {
+                last: last.position(),
+                first: first.position(),
+                close: *close,
+            },
         }
     }
 }
 
-impl Transform for FlattenedEvent {
-    fn transform(&self, mat: &Transform2D) -> Self {
+impl PathEvent {
+    pub fn transformed<T: Transformation<f32>>(&self, mat: &T) -> Self {
         match self {
-            FlattenedEvent::MoveTo(ref to) => {
-                FlattenedEvent::MoveTo(mat.transform_point(to))
-            }
-            FlattenedEvent::Line(ref segment) => {
-                FlattenedEvent::Line(segment.transform(mat))
-            }
-            FlattenedEvent::Close(ref segment) => {
-                FlattenedEvent::Close(segment.transform(mat))
-            }
-        }
-    }
-}
-
-impl Transform for QuadraticEvent {
-    fn transform(&self, mat: &Transform2D) -> Self {
-        match self {
-            QuadraticEvent::MoveTo(ref to) => {
-                QuadraticEvent::MoveTo(mat.transform_point(to))
-            }
-            QuadraticEvent::Line(ref segment) => {
-                QuadraticEvent::Line(segment.transform(mat))
-            }
-            QuadraticEvent::Quadratic(ref segment) => {
-                QuadraticEvent::Quadratic(segment.transform(mat))
-            }
-            QuadraticEvent::Close(ref segment) => {
-                QuadraticEvent::Close(segment.transform(mat))
-            }
-        }
-    }
-}
-
-impl Transform for PathEvent {
-    fn transform(&self, mat: &Transform2D) -> Self {
-        match self {
-            PathEvent::MoveTo(ref to) => { PathEvent::MoveTo(mat.transform_point(to)) }
-            PathEvent::Line(ref segment) => { PathEvent::Line(segment.transform(mat)) }
-            PathEvent::Quadratic(ref segment) => { PathEvent::Quadratic(segment.transform(mat)) }
-            PathEvent::Cubic(ref segment) => { PathEvent::Cubic(segment.transform(mat)) }
-            PathEvent::Close(ref segment) => { PathEvent::Close(segment.transform(mat)) }
+            Event::Line { from, to } => Event::Line {
+                from: mat.transform_point(*from),
+                to: mat.transform_point(*to),
+            },
+            Event::Quadratic { from, ctrl, to } => Event::Quadratic {
+                from: mat.transform_point(*from),
+                ctrl: mat.transform_point(*ctrl),
+                to: mat.transform_point(*to),
+            },
+            Event::Cubic {
+                from,
+                ctrl1,
+                ctrl2,
+                to,
+            } => Event::Cubic {
+                from: mat.transform_point(*from),
+                ctrl1: mat.transform_point(*ctrl1),
+                ctrl2: mat.transform_point(*ctrl2),
+                to: mat.transform_point(*to),
+            },
+            Event::Begin { at } => Event::Begin {
+                at: mat.transform_point(*at),
+            },
+            Event::End { first, last, close } => Event::End {
+                last: mat.transform_point(*last),
+                first: mat.transform_point(*first),
+                close: *close,
+            },
         }
     }
 }

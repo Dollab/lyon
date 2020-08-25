@@ -4,13 +4,15 @@ extern crate bencher;
 #[cfg(feature = "libtess2")]
 extern crate tess2_sys as tess2;
 
-use lyon::path::Path;
+use lyon::extra::rust_logo::build_logo_path;
+use lyon::math::Point;
 use lyon::path::builder::*;
 use lyon::path::iterator::PathIterator;
-use lyon::extra::rust_logo::build_logo_path;
+use lyon::path::Path;
 use lyon::tessellation::geometry_builder::{simple_builder, VertexBuffers};
-use lyon::tessellation::{FillEvents, FillTessellator, FillOptions, FillVertex, LineJoin};
-use lyon::tessellation::{StrokeTessellator, StrokeOptions, StrokeVertex};
+use lyon::tessellation::{EventQueue, FillTessellator};
+use lyon::tessellation::{FillOptions, LineJoin};
+use lyon::tessellation::{StrokeOptions, StrokeTessellator};
 
 use bencher::Bencher;
 
@@ -42,7 +44,7 @@ fn flattening_02_logo_iter(bench: &mut Bencher) {
         let mut builder = Path::builder();
         for _ in 0..N {
             for evt in path.iter().flattened(0.05) {
-                builder.flat_event(evt);
+                builder.path_event(evt);
             }
         }
     })
@@ -64,35 +66,41 @@ fn flattening_03_logo_builder(bench: &mut Bencher) {
 }
 
 fn fill_tess_01_logo(bench: &mut Bencher) {
-    let mut path = Path::builder().with_svg();
+    let mut path = Path::builder().flattened(0.05).with_svg();
     build_logo_path(&mut path);
     let path = path.build();
 
     let mut tess = FillTessellator::new();
     let options = FillOptions::default();
-    let events = FillEvents::from_path(0.05, path.iter());
 
     bench.iter(|| {
         for _ in 0..N {
-            let mut buffers: VertexBuffers<FillVertex, u16> = VertexBuffers::with_capacity(512, 1450);
-            tess.tessellate_events(&events, &options, &mut simple_builder(&mut buffers)).unwrap();
+            let mut buffers: VertexBuffers<Point, u16> = VertexBuffers::with_capacity(512, 1450);
+            tess.tessellate(&path, &options, &mut simple_builder(&mut buffers))
+                .unwrap();
         }
     })
 }
 
-fn fill_tess_02_logo_no_normals(bench: &mut Bencher) {
-    let mut path = Path::builder().with_svg();
+fn fill_tess_06_logo_with_ids(bench: &mut Bencher) {
+    let mut path = Path::builder().flattened(0.05).with_svg();
     build_logo_path(&mut path);
     let path = path.build();
 
     let mut tess = FillTessellator::new();
-    let options = FillOptions::default().with_normals(false);
-    let events = FillEvents::from_path(0.05, path.iter());
+    let options = FillOptions::default();
 
     bench.iter(|| {
         for _ in 0..N {
-            let mut buffers: VertexBuffers<FillVertex, u16> = VertexBuffers::with_capacity(512, 1450);
-            tess.tessellate_events(&events, &options, &mut simple_builder(&mut buffers)).unwrap();
+            let mut buffers: VertexBuffers<Point, u16> = VertexBuffers::with_capacity(512, 1450);
+            tess.tessellate_with_ids(
+                path.id_iter(),
+                &path,
+                None,
+                &options,
+                &mut simple_builder(&mut buffers),
+            )
+            .unwrap();
         }
     })
 }
@@ -103,32 +111,19 @@ fn fill_tess_03_logo_no_intersections(bench: &mut Bencher) {
     let path = path.build();
 
     let mut tess = FillTessellator::new();
-    let options = FillOptions::default().assume_no_intersections();
-    let events = FillEvents::from_path(0.05, path.iter());
-
-    bench.iter(|| {
-        for _ in 0..N {
-            let mut buffers: VertexBuffers<FillVertex, u16> = VertexBuffers::new();
-            tess.tessellate_events(&events, &options, &mut simple_builder(&mut buffers)).unwrap();
-        }
-    })
-}
-
-fn fill_tess_04_logo_no_normals_no_intersections(bench: &mut Bencher) {
-    let mut path = Path::builder().with_svg();
-    build_logo_path(&mut path);
-    let path = path.build();
-
-    let mut tess = FillTessellator::new();
     let options = FillOptions::default()
-        .with_normals(false)
-        .assume_no_intersections();
-    let events = FillEvents::from_path(0.05, path.iter());
+        .with_tolerance(0.05)
+        .with_intersections(false);
 
     bench.iter(|| {
         for _ in 0..N {
-            let mut buffers: VertexBuffers<FillVertex, u16> = VertexBuffers::with_capacity(512, 1450);
-            tess.tessellate_events(&events, &options, &mut simple_builder(&mut buffers)).unwrap();
+            let mut buffers: VertexBuffers<Point, u16> = VertexBuffers::new();
+            tess.tessellate_path(
+                &path,
+                &options,
+                &mut simple_builder(&mut buffers),
+            )
+            .unwrap();
         }
     })
 }
@@ -139,24 +134,27 @@ fn fill_tess_05_logo_no_curve(bench: &mut Bencher) {
     let path = path.build();
 
     let mut tess = FillTessellator::new();
-    let options = FillOptions::default();
-    let events = FillEvents::from_path(1000000.0, path.iter());
+    let options = FillOptions::default().with_tolerance(1000000.0);
 
     bench.iter(|| {
         for _ in 0..N {
-            let mut buffers: VertexBuffers<FillVertex, u16> = VertexBuffers::new();
-            tess.tessellate_events(&events, &options, &mut simple_builder(&mut buffers)).unwrap();
+            let mut buffers: VertexBuffers<Point, u16> = VertexBuffers::new();
+            tess.tessellate_path(
+                &path,
+                &options,
+                &mut simple_builder(&mut buffers),
+            )
+            .unwrap();
         }
     })
 }
 
 #[cfg(feature = "libtess2")]
 fn cmp_01_libtess2_rust_logo(bench: &mut Bencher) {
-    use tess2::*;
-    use std::slice;
+    use lyon::path::PathEvent;
     use std::os::raw::c_void;
-
-    use lyon::path::FlattenedEvent;
+    use std::slice;
+    use tess2::*;
 
     let mut path = Path::builder().with_svg();
     build_logo_path(&mut path);
@@ -167,46 +165,45 @@ fn cmp_01_libtess2_rust_logo(bench: &mut Bencher) {
     let tolerance = FillOptions::default().tolerance;
     for evt in path.iter().flattened(tolerance) {
         match evt {
-            FlattenedEvent::MoveTo(p) => {
-                contours.push(vec![p]);
+            PathEvent::Begin { at } => {
+                contours.push(vec![at]);
             }
-            FlattenedEvent::LineTo(p) => {
-                contours.last_mut().unwrap().push(p);
+            PathEvent::Line { to, .. } => {
+                contours.last_mut().unwrap().push(to);
             }
-            FlattenedEvent::Close => {}
+            _ => {}
         }
     }
 
-    bench.iter(|| {
-        unsafe {
-            let tess = tessNewTess(0 as *mut TESSalloc);
-            for _ in 0..N {
-                for contour in &contours {
-                    tessAddContour(
-                        tess,
-                        2,
-                        (&contour[0].x as *const f32) as *const c_void,
-                        8,
-                        contour.len() as i32
-                    );
-                }
-                let res = tessTesselate(tess,
-                    TessWindingRule::TESS_WINDING_ODD,
-                    TessElementType::TESS_POLYGONS,
-                    3,
+    bench.iter(|| unsafe {
+        let tess = tessNewTess(0 as *mut TESSalloc);
+        for _ in 0..N {
+            for contour in &contours {
+                tessAddContour(
+                    tess,
                     2,
-                    0 as *mut TESSreal
+                    (&contour[0].x as *const f32) as *const c_void,
+                    8,
+                    contour.len() as i32,
                 );
-                assert!(res == 1);
-
-                let raw_triangle_count = tessGetElementCount(tess);
-                let triangle_count = raw_triangle_count as usize;
-                assert!(triangle_count > 1);
-
-                let _vertex_buffer = slice::from_raw_parts(tessGetVertices(tess),
-                                                          tessGetVertexCount(tess) as usize * 2);
-                let _triangle_buffer = slice::from_raw_parts(tessGetElements(tess), triangle_count * 3);
             }
+            let res = tessTesselate(
+                tess,
+                TessWindingRule::TESS_WINDING_ODD,
+                TessElementType::TESS_POLYGONS,
+                3,
+                2,
+                0 as *mut TESSreal,
+            );
+            assert!(res == 1);
+
+            let raw_triangle_count = tessGetElementCount(tess);
+            let triangle_count = raw_triangle_count as usize;
+            assert!(triangle_count > 1);
+
+            let _vertex_buffer =
+                slice::from_raw_parts(tessGetVertices(tess), tessGetVertexCount(tess) as usize * 2);
+            let _triangle_buffer = slice::from_raw_parts(tessGetElements(tess), triangle_count * 3);
         }
     });
 }
@@ -218,17 +215,17 @@ fn cmp_02_lyon_rust_logo(bench: &mut Bencher) {
     // - The tessellator and other allocations are not recycled between runs.
     // - No normals.
 
-    let options = FillOptions::default().with_normals(false);
+    let options = FillOptions::default();
     let mut path = Path::builder().flattened(options.tolerance).with_svg();
     build_logo_path(&mut path);
     let path = path.build();
 
-
     bench.iter(|| {
         for _ in 0..N {
             let mut tess = FillTessellator::new();
-            let mut buffers: VertexBuffers<FillVertex, u16> = VertexBuffers::new();
-            tess.tessellate_path(&path, &options, &mut simple_builder(&mut buffers)).unwrap();
+            let mut buffers: VertexBuffers<Point, u16> = VertexBuffers::new();
+            tess.tessellate(&path, &options, &mut simple_builder(&mut buffers))
+                .unwrap();
         }
     })
 }
@@ -240,7 +237,7 @@ fn fill_events_01_logo(bench: &mut Bencher) {
 
     bench.iter(|| {
         for _ in 0..N {
-            let _events = FillEvents::from_path(0.05, path.iter());
+            let _events = EventQueue::from_path(0.05, path.iter());
         }
     })
 }
@@ -252,7 +249,7 @@ fn fill_events_02_logo_pre_flattened(bench: &mut Bencher) {
 
     bench.iter(|| {
         for _ in 0..N {
-            let _events = FillEvents::from_path(0.05, path.iter());
+            let _events = EventQueue::from_path(0.05, path.iter());
         }
     })
 }
@@ -267,8 +264,9 @@ fn fill_events_03_logo_with_tess(bench: &mut Bencher) {
 
     bench.iter(|| {
         for _ in 0..N {
-            let mut buffers: VertexBuffers<FillVertex, u16> = VertexBuffers::new();
-            tess.tessellate_path(&path, &options, &mut simple_builder(&mut buffers)).unwrap();
+            let mut buffers: VertexBuffers<Point, u16> = VertexBuffers::new();
+            tess.tessellate(&path, &options, &mut simple_builder(&mut buffers))
+                .unwrap();
         }
     })
 }
@@ -283,8 +281,9 @@ fn stroke_01_logo_miter(bench: &mut Bencher) {
 
     bench.iter(|| {
         for _ in 0..N {
-            let mut buffers: VertexBuffers<StrokeVertex, u16> = VertexBuffers::with_capacity(1024, 3000);
-            tess.tessellate_path(&path, &options, &mut simple_builder(&mut buffers)).unwrap();
+            let mut buffers: VertexBuffers<Point, u16> = VertexBuffers::with_capacity(1024, 3000);
+            tess.tessellate(&path, &options, &mut simple_builder(&mut buffers))
+                .unwrap();
         }
     })
 }
@@ -299,8 +298,9 @@ fn stroke_02_logo_bevel(bench: &mut Bencher) {
 
     bench.iter(|| {
         for _ in 0..N {
-            let mut buffers: VertexBuffers<StrokeVertex, u16> = VertexBuffers::with_capacity(1024, 3000);
-            tess.tessellate_path(&path, &options, &mut simple_builder(&mut buffers)).unwrap();
+            let mut buffers: VertexBuffers<Point, u16> = VertexBuffers::with_capacity(1024, 3000);
+            tess.tessellate(&path, &options, &mut simple_builder(&mut buffers))
+                .unwrap();
         }
     })
 }
@@ -315,57 +315,47 @@ fn stroke_03_logo_round(bench: &mut Bencher) {
 
     bench.iter(|| {
         for _ in 0..N {
-            let mut buffers: VertexBuffers<StrokeVertex, u16> = VertexBuffers::with_capacity(1024, 3000);
-            tess.tessellate_path(&path, &options, &mut simple_builder(&mut buffers)).unwrap();
+            let mut buffers: VertexBuffers<Point, u16> = VertexBuffers::with_capacity(1024, 3000);
+            tess.tessellate(&path, &options, &mut simple_builder(&mut buffers))
+                .unwrap();
         }
     })
 }
 
-benchmark_group!(stroke_tess,
-  stroke_01_logo_miter,
-  stroke_02_logo_bevel,
-  stroke_03_logo_round
-);
-
-benchmark_group!(fill_tess,
-  fill_tess_01_logo,
-  fill_tess_02_logo_no_normals,
-  fill_tess_03_logo_no_intersections,
-  fill_tess_04_logo_no_normals_no_intersections,
-  fill_tess_05_logo_no_curve
-);
-
-#[cfg(feature = "libtess2")]
-benchmark_group!(cmp_tess2,
-  cmp_01_libtess2_rust_logo,
-  cmp_02_lyon_rust_logo
-);
-
-benchmark_group!(fill_events,
-  fill_events_01_logo,
-  fill_events_02_logo_pre_flattened,
-  fill_events_03_logo_with_tess
-);
-
-benchmark_group!(flattening,
-  flattening_01_logo_simple_iter,
-  flattening_02_logo_iter,
-  flattening_03_logo_builder
-);
-
-#[cfg(feature = "libtess2")]
-benchmark_main!(
-    fill_tess,
-    cmp_tess2,
-    fill_events,
+benchmark_group!(
     stroke_tess,
-    flattening
+    stroke_01_logo_miter,
+    stroke_02_logo_bevel,
+    stroke_03_logo_round
 );
+
+benchmark_group!(
+    fill_tess,
+    fill_tess_01_logo,
+    fill_tess_06_logo_with_ids,
+    fill_tess_03_logo_no_intersections,
+    fill_tess_05_logo_no_curve
+);
+
+#[cfg(feature = "libtess2")]
+benchmark_group!(cmp_tess2, cmp_01_libtess2_rust_logo, cmp_02_lyon_rust_logo);
+
+benchmark_group!(
+    fill_events,
+    fill_events_01_logo,
+    fill_events_02_logo_pre_flattened,
+    fill_events_03_logo_with_tess
+);
+
+benchmark_group!(
+    flattening,
+    flattening_01_logo_simple_iter,
+    flattening_02_logo_iter,
+    flattening_03_logo_builder
+);
+
+#[cfg(feature = "libtess2")]
+benchmark_main!(fill_tess, cmp_tess2, fill_events, stroke_tess, flattening);
 
 #[cfg(not(feature = "libtess2"))]
-benchmark_main!(
-    fill_tess,
-    fill_events,
-    stroke_tess,
-    flattening
-);
+benchmark_main!(fill_tess, fill_events, stroke_tess, flattening);

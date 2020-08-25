@@ -31,44 +31,38 @@ The intent is for this library to be useful in projects like [Servo](https://ser
 ## Example
 
 ```rust
-use lyon::math::point;
+extern crate lyon;
+use lyon::math::{point, Point};
 use lyon::path::Path;
 use lyon::path::builder::*;
 use lyon::tessellation::*;
-
 fn main() {
     // Build a Path.
     let mut builder = Path::builder();
-    builder.move_to(point(0.0, 0.0));
+    builder.begin(point(0.0, 0.0));
     builder.line_to(point(1.0, 0.0));
     builder.quadratic_bezier_to(point(2.0, 0.0), point(2.0, 1.0));
     builder.cubic_bezier_to(point(1.0, 1.0), point(0.0, 1.0), point(0.0, 0.0));
-    builder.close();
+    builder.end(true);
     let path = builder.build();
-
     // Let's use our own custom vertex type instead of the default one.
     #[derive(Copy, Clone, Debug)]
-    struct MyVertex { position: [f32; 2], normal: [f32; 2] };
-
+    struct MyVertex { position: [f32; 2] };
     // Will contain the result of the tessellation.
     let mut geometry: VertexBuffers<MyVertex, u16> = VertexBuffers::new();
-
     let mut tessellator = FillTessellator::new();
-
     {
         // Compute the tessellation.
         tessellator.tessellate_path(
             &path,
             &FillOptions::default(),
-            &mut BuffersBuilder::new(&mut geometry, |vertex : FillVertex| {
+            &mut BuffersBuilder::new(&mut geometry, |pos: Point, _: FillAttributes| {
                 MyVertex {
-                    position: vertex.position.to_array(),
-                    normal: vertex.normal.to_array(),
+                    position: pos.to_array(),
                 }
             }),
         ).unwrap();
     }
-
     // The tessellated geometry is ready to be uploaded to the GPU.
     println!(" -- {} vertices {} indices",
         geometry.vertices.len(),
@@ -89,7 +83,7 @@ Lyon is *not* an SVG renderer. For now lyon mainly provides primitives to tessel
 
 ### How do I render the output of the tessellators?
 
-Although the format of the output of the tessellators is customizable, the algorithms are designed to generate a vertex and an index buffer. See the [lyon::tessellation documentation](https://docs.rs/lyon_tessellation/0.7.4/lyon_tessellation/#the-output-geometry-builders) for more details.
+Although the format of the output of the tessellators is customizable, the algorithms are designed to generate a vertex and an index buffer. See the [lyon::tessellation documentation](https://docs.rs/lyon_tessellation/latest/lyon_tessellation/#the-output-geometry-builders) for more details.
 
 ### Is anti-aliasing supported?
 

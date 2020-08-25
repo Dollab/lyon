@@ -3,29 +3,29 @@ extern crate lyon;
 extern crate rand;
 #[macro_use]
 extern crate gfx;
-extern crate gfx_window_glutin;
 extern crate gfx_device_gl;
+extern crate gfx_window_glutin;
 extern crate glutin;
-extern crate regex;
 extern crate itertools;
+extern crate regex;
 
 mod commands;
-mod tessellate;
-mod fuzzing;
 mod flatten;
+mod fuzzing;
 mod show;
+mod tessellate;
 
 use clap::*;
 use commands::*;
 
-use std::fs::File;
-use std::io::{Read, Write, stdout, stderr};
-use lyon::svg::path_utils::build_path;
-use lyon::path::Path;
-use lyon::tessellation::{FillOptions, StrokeOptions, LineJoin, LineCap};
-use lyon::algorithms::hatching::{HatchingOptions, DotOptions};
+use lyon::algorithms::hatching::{DotOptions, HatchingOptions};
 use lyon::extra::debugging::find_reduced_test_case;
 use lyon::geom::euclid::Angle;
+use lyon::path::Path;
+use lyon::svg::path_utils::build_path;
+use lyon::tessellation::{FillOptions, FillRule, LineCap, LineJoin, Orientation, StrokeOptions};
+use std::fs::File;
+use std::io::{stderr, stdout, Read, Write};
 
 fn main() {
     let matches = App::new("Lyon command-line interface")
@@ -33,161 +33,161 @@ fn main() {
         .author("Nicolas Silva <nical@fastmail.com>")
         .about("Path tessellator")
         .subcommand(
-            declare_tess_params(SubCommand::with_name("tessellate"))
-            .about("Tessellates a path")
-            .arg(Arg::with_name("DEBUG")
-                .short("d")
-                .long("debug")
-                .help("Enable debugging")
-            )
-            .arg(Arg::with_name("COUNT")
-                .short("c")
-                .long("count")
-                .help("Prints the number of triangles and vertices")
-            )
-            .arg(Arg::with_name("OUTPUT")
-                .short("o")
-                .long("output")
-                .help("Sets the output file to use")
-                .value_name("FILE")
-                .takes_value(true)
-                .required(false)
-            )
-            .arg(Arg::with_name("FLOAT_PRECISION")
-                .long("float-precision")
-                .help("Sets the floating point precision for the output")
-                .value_name("FLOAT_PRECISION")
-                .takes_value(true)
-                .required(false)
-            )
-            .arg(Arg::with_name("FORMAT")
-                 .long("format")
-                 .help("Prints the output with the specified format")
-                 .value_name("FORMAT_STRING")
-                 .takes_value(true)
-                 .required(false)
-            )
+            declare_tess_params(SubCommand::with_name("tessellate"), true)
+                .about("Tessellates a path")
+                .arg(
+                    Arg::with_name("DEBUG")
+                        .short("d")
+                        .long("debug")
+                        .help("Enable debugging"),
+                )
+                .arg(
+                    Arg::with_name("COUNT")
+                        .short("c")
+                        .long("count")
+                        .help("Prints the number of triangles and vertices"),
+                )
+                .arg(
+                    Arg::with_name("OUTPUT")
+                        .short("o")
+                        .long("output")
+                        .help("Sets the output file to use")
+                        .value_name("FILE")
+                        .takes_value(true)
+                        .required(false),
+                )
+                .arg(
+                    Arg::with_name("FLOAT_PRECISION")
+                        .long("float-precision")
+                        .help("Sets the floating point precision for the output")
+                        .value_name("FLOAT_PRECISION")
+                        .takes_value(true)
+                        .required(false),
+                )
+                .arg(
+                    Arg::with_name("FORMAT")
+                        .long("format")
+                        .help("Prints the output with the specified format")
+                        .value_name("FORMAT_STRING")
+                        .takes_value(true)
+                        .required(false),
+                ),
         )
         .subcommand(
             declare_input_path(SubCommand::with_name("path"))
-            .about("Transforms an SVG path")
-            .arg(Arg::with_name("TOLERANCE")
-                .short("t")
-                .long("tolerance")
-                .help("Sets the tolerance threshold (0.5 by default)")
-                .value_name("TOLERANCE")
-                .takes_value(true)
-            )
-            .arg(Arg::with_name("FLATTEN")
-                .short("f")
-                .long("flatten")
-                .help("Approximates all curves with line segments")
-            )
-            .arg(Arg::with_name("COUNT")
-                .short("c")
-                .long("count")
-                .help("Prints the number of vertices")
-            )
-            .arg(Arg::with_name("OUTPUT")
-                .short("o")
-                .long("output")
-                .help("Sets the output file to use")
-                .value_name("FILE")
-                .takes_value(true)
-                .required(false)
-            )
-        )
-        .subcommand(SubCommand::with_name("fuzz")
-            .about("tessellates random paths in order to find potential bugs")
-            .arg(Arg::with_name("FILL")
-                .short("f")
-                .long("fill")
-                .help("Fills the path")
-            )
-            .arg(Arg::with_name("STROKE")
-                .short("s")
-                .long("stroke")
-                .help("Strokes the path")
-            )
-            .arg(Arg::with_name("MAX_POINTS")
-                .long("max-points")
-                .help("Sets the maximum number of points per paths")
-                .value_name("MAX_POINTS")
-                .takes_value(true)
-            )
-            .arg(Arg::with_name("MIN_POINTS")
-                .long("min-points")
-                .help("Sets the minimum number of points per paths")
-                .value_name("MIN_POINTS")
-                .takes_value(true)
-            )
-            .arg(Arg::with_name("TESSELLATOR")
-                .long("tessellator")
-                .help("Select the tessellator to use")
-                .value_name("TESSELLATOR")
-                .takes_value(true)
-            )
-            .arg(Arg::with_name("IGNORE_ERRORS")
-                .long("ignore-errors")
-                .help("Try to continue when encoutering errors unless it is a panic.")
-            )
+                .about("Transforms an SVG path")
+                .arg(
+                    Arg::with_name("TOLERANCE")
+                        .short("t")
+                        .long("tolerance")
+                        .help("Sets the tolerance threshold (0.5 by default)")
+                        .value_name("TOLERANCE")
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("FLATTEN")
+                        .short("f")
+                        .long("flatten")
+                        .help("Approximates all curves with line segments"),
+                )
+                .arg(
+                    Arg::with_name("COUNT")
+                        .short("c")
+                        .long("count")
+                        .help("Prints the number of vertices"),
+                )
+                .arg(
+                    Arg::with_name("OUTPUT")
+                        .short("o")
+                        .long("output")
+                        .help("Sets the output file to use")
+                        .value_name("FILE")
+                        .takes_value(true)
+                        .required(false),
+                ),
         )
         .subcommand(
-            declare_tess_params(SubCommand::with_name("show"))
-            .about("Renders a path in an interactive window")
-            .arg(Arg::with_name("ANTIALIASING")
-                .long("anti-aliasing")
-                .help("Sets the anti-aliasing method to use")
-                .value_name("ANTIALIASING")
-                .takes_value(true)
-            )
-            .arg(Arg::with_name("BACKGROUND")
-                .long("background")
-                .value_name("Blue|Dark|Clear")
-                .help("Change the color of the window's background")
-                .takes_value(true)
-            )
-            .arg(Arg::with_name("DEBUGGER_2D")
-                .long("enable-debugger-2d")
-                .value_name("filter")
-                .help("Install a debugger 2d on the fill tessellator and display its output")
-                .takes_value(true)
-            )
+            declare_tess_params(SubCommand::with_name("fuzz"), false)
+                .about("tessellates random paths in order to find potential bugs")
+                .arg(
+                    Arg::with_name("MAX_POINTS")
+                        .long("max-points")
+                        .help("Sets the maximum number of points per paths")
+                        .value_name("MAX_POINTS")
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("MIN_POINTS")
+                        .long("min-points")
+                        .help("Sets the minimum number of points per paths")
+                        .value_name("MIN_POINTS")
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("IGNORE_ERRORS")
+                        .long("ignore-errors")
+                        .help("Try to continue when encoutering errors unless it is a panic."),
+                ),
+        )
+        .subcommand(
+            declare_tess_params(SubCommand::with_name("show"), true)
+                .about("Renders a path in an interactive window")
+                .arg(
+                    Arg::with_name("ANTIALIASING")
+                        .long("anti-aliasing")
+                        .help("Sets the anti-aliasing method to use")
+                        .value_name("ANTIALIASING")
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("BACKGROUND")
+                        .long("background")
+                        .value_name("Blue|Dark|Clear")
+                        .help("Change the color of the window's background")
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("DEBUGGER_2D")
+                        .long("enable-debugger-2d")
+                        .value_name("filter")
+                        .help(
+                            "Install a debugger 2d on the fill tessellator and display its output",
+                        )
+                        .takes_value(true),
+                ),
         )
         .get_matches();
 
     if let Some(command) = matches.subcommand_matches("tessellate") {
         let output = get_output(&command);
-        let cmd = get_tess_command(&command);
+        let cmd = get_tess_command(&command, true);
         let cmd_copy = cmd.clone();
         let float_precision = cmd.float_precision;
 
-        let res = ::std::panic::catch_unwind(|| {
-            tessellate::tessellate_path(cmd)
-        });
+        let res = ::std::panic::catch_unwind(|| tessellate::tessellate_path(cmd));
 
         match res {
             Ok(Ok(buffers)) => {
-                tessellate::write_output(buffers,
-                                         command.is_present("COUNT"),
-                                         command.value_of("FORMAT"),
-                                         float_precision,
-                                         output).unwrap();
+                tessellate::write_output(
+                    buffers,
+                    command.is_present("COUNT"),
+                    command.value_of("FORMAT"),
+                    float_precision,
+                    output,
+                )
+                .unwrap();
             }
             _ => {
                 println!(" -- Error while tessellating");
                 if command.is_present("DEBUG") {
                     println!(" -- Looking for a minimal test case...");
-                    find_reduced_test_case(
-                        cmd_copy.path.as_slice(),
-                        &|path: Path| {
-                            let cmd = TessellateCmd {
-                                path,
-                                ..cmd_copy.clone()
-                            };
-                            tessellate::tessellate_path(cmd).is_err()
-                        },
-                    );
+                    find_reduced_test_case(cmd_copy.path.as_slice(), &|path: Path| {
+                        let cmd = TessellateCmd {
+                            path,
+                            ..cmd_copy.clone()
+                        };
+                        tessellate::tessellate_path(cmd).is_err()
+                    });
                 }
                 panic!("aborting");
             }
@@ -208,41 +208,50 @@ fn main() {
 
     if let Some(fuzz_matches) = matches.subcommand_matches("fuzz") {
         fuzzing::run(FuzzCmd {
-            fill: fuzz_matches.is_present("FILL"),
-            stroke: fuzz_matches.is_present("STROKE"),
-            min_points: fuzz_matches.value_of("MIN_POINTS").and_then(|str_val| str_val.parse::<u32>().ok()),
-            max_points: fuzz_matches.value_of("MAX_POINTS").and_then(|str_val| str_val.parse::<u32>().ok()),
+            tess: get_tess_command(fuzz_matches, false),
+            min_points: fuzz_matches
+                .value_of("MIN_POINTS")
+                .and_then(|str_val| str_val.parse::<u32>().ok()),
+            max_points: fuzz_matches
+                .value_of("MAX_POINTS")
+                .and_then(|str_val| str_val.parse::<u32>().ok()),
             tessellator: get_tessellator(fuzz_matches),
             ignore_errors: fuzz_matches.is_present("IGNORE_ERRORS"),
         });
     }
 
     if let Some(command) = matches.subcommand_matches("show") {
-        let cmd = get_tess_command(command);
+        let cmd = get_tess_command(command, true);
         let render_params = get_render_params(command);
         show::show_path(cmd, render_params);
     }
 }
 
 fn declare_input_path<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
-    app.arg(Arg::with_name("PATH")
-        .value_name("PATH")
-        .help("An SVG path")
-        .takes_value(true)
-        .required(false)
+    app.arg(
+        Arg::with_name("PATH")
+            .value_name("PATH")
+            .help("An SVG path")
+            .takes_value(true)
+            .required(false),
     )
-    .arg(Arg::with_name("INPUT")
-        .short("i")
-        .long("input")
-        .help("Sets the input file to use")
-        .value_name("FILE")
-        .takes_value(true)
-        .required(false)
+    .arg(
+        Arg::with_name("INPUT")
+            .short("i")
+            .long("input")
+            .help("Sets the input file to use")
+            .value_name("FILE")
+            .takes_value(true)
+            .required(false),
     )
 }
 
-fn declare_tess_params<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
-    declare_input_path(app)
+fn declare_tess_params<'a, 'b>(app: App<'a, 'b>, need_path: bool) -> App<'a, 'b> {
+    if need_path {
+        declare_input_path(app)
+    } else {
+        app
+    }
     .arg(Arg::with_name("FILL")
         .short("f")
         .long("fill")
@@ -295,16 +304,23 @@ fn declare_tess_params<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
         .value_name("MITER_LIMIT")
         .takes_value(true)
     )
+    .arg(Arg::with_name("FILL_RULE")
+        .long("fill-rule")
+        .help("Fill rule")
+        .value_name("FILL_RULE")
+        .takes_value(true)
+    )
+    .arg(Arg::with_name("SWEEP_ORIENTATION")
+        .long("sweep-orientation")
+        .help("Traverse the geometry vertically or horizontally.")
+        .value_name("SWEEP_ORIENTATION")
+        .takes_value(true)
+    )
     .arg(Arg::with_name("TESSELLATOR")
         .long("tessellator")
         .help("Select the tessellator to use")
         .value_name("TESSELLATOR")
         .takes_value(true)
-    )
-    .arg(Arg::with_name("NORMALS")
-        .short("n")
-        .long("compute-normals")
-        .help("Enable computing vertex normals")
     )
     .arg(Arg::with_name("HATCHING_ANGLE")
         .long("angle")
@@ -329,15 +345,14 @@ fn get_path(matches: &ArgMatches) -> Option<Path> {
         return None;
     }
 
-
     return match build_path(Path::builder().with_svg(), &path_str) {
-        Ok(path) => { Some(path) }
+        Ok(path) => Some(path),
         Err(e) => {
             println!("Error while parsing path: {}", path_str);
             println!("{:?}", e);
             None
         }
-    }
+    };
 }
 
 fn get_render_params(matches: &ArgMatches) -> RenderCmd {
@@ -357,20 +372,36 @@ fn get_render_params(matches: &ArgMatches) -> RenderCmd {
     }
 }
 
-fn get_tess_command(command: &ArgMatches) -> TessellateCmd {
-    let path = get_path(command).expect("Need a path to tessellate");
+fn get_tess_command(command: &ArgMatches, need_path: bool) -> TessellateCmd {
+    let path = if need_path {
+        get_path(command).expect("Need a path to tessellate")
+    } else {
+        Path::new()
+    };
+
     let stroke = get_stroke(command);
     let hatch = get_hatching(command);
     let dots = get_dots(command);
-    let normals = command.is_present("NORMALS");
-    let fill = if command.is_present("FILL") || (!stroke.is_some() && !hatch.is_some() && !dots.is_some()) {
-        Some(FillOptions::tolerance(get_tolerance(&command)).with_normals(normals))
+    let fill_rule = get_fill_rule(command);
+    let orientation = get_orientation(command);
+    let fill = if command.is_present("FILL")
+        || (!stroke.is_some() && !hatch.is_some() && !dots.is_some())
+    {
+        Some(
+            FillOptions::tolerance(get_tolerance(&command))
+                .with_fill_rule(fill_rule)
+                .with_sweep_orientation(orientation),
+        )
     } else {
         None
     };
 
     let float_precision = if let Some(fp) = command.value_of("FLOAT_PRECISION") {
-        Some(fp.parse::<usize>().expect("Precision must be an integer").min(7))
+        Some(
+            fp.parse::<usize>()
+                .expect("Precision must be an integer")
+                .min(7),
+        )
     } else {
         None
     };
@@ -405,7 +436,6 @@ fn get_stroke(matches: &ArgMatches) -> Option<StrokeOptions> {
         options.line_width = get_line_width(matches);
         options.line_join = get_line_join(matches);
         options.tolerance = get_tolerance(matches);
-        options.apply_line_width = false;
         if let Some(limit) = get_miter_limit(matches) {
             options.miter_limit = limit;
         }
@@ -443,7 +473,9 @@ fn get_hatching(matches: &ArgMatches) -> Option<HatchingParams> {
     if let Some(s) = matches.value_of("HATCH") {
         let spacing = match s.parse() {
             Ok(v) => v,
-            Err(_) => { return None; }
+            Err(_) => {
+                return None;
+            }
         };
 
         let mut stroke = StrokeOptions::default();
@@ -453,7 +485,6 @@ fn get_hatching(matches: &ArgMatches) -> Option<HatchingParams> {
         stroke.line_width = get_line_width(matches);
         stroke.line_join = get_line_join(matches);
         stroke.tolerance = get_tolerance(matches);
-        stroke.apply_line_width = false;
 
         let options = HatchingOptions::DEFAULT
             .with_tolerance(stroke.tolerance)
@@ -472,7 +503,9 @@ fn get_dots(matches: &ArgMatches) -> Option<DotParams> {
     if let Some(s) = matches.value_of("DOT") {
         let spacing = match s.parse() {
             Ok(v) => v,
-            Err(_) => { return None; }
+            Err(_) => {
+                return None;
+            }
         };
 
         let mut stroke = StrokeOptions::default();
@@ -484,7 +517,6 @@ fn get_dots(matches: &ArgMatches) -> Option<DotParams> {
         stroke.end_cap = cap;
         stroke.line_width = get_line_width(matches);
         stroke.tolerance = get_tolerance(matches);
-        stroke.apply_line_width = false;
 
         let options = DotOptions::DEFAULT
             .with_tolerance(stroke.tolerance)
@@ -507,7 +539,7 @@ fn get_line_join(matches: &ArgMatches) -> LineJoin {
             "Round" => LineJoin::Round,
             "Bevel" => LineJoin::Bevel,
             _ => LineJoin::Miter,
-        }
+        };
     }
     return LineJoin::Miter;
 }
@@ -519,9 +551,31 @@ fn get_line_cap(matches: &ArgMatches) -> LineCap {
             "Square" => LineCap::Square,
             "Round" => LineCap::Round,
             _ => LineCap::Butt,
-        }
+        };
     }
     return LineCap::Butt;
+}
+
+fn get_fill_rule(matches: &ArgMatches) -> FillRule {
+    if let Some(rule_str) = matches.value_of("FILL_RULE") {
+        return match rule_str {
+            "NonZero" | "nonzero" => FillRule::NonZero,
+            _ => FillRule::EvenOdd,
+        };
+    }
+
+    return FillRule::EvenOdd;
+}
+
+fn get_orientation(matches: &ArgMatches) -> Orientation {
+    if let Some(orientation_str) = matches.value_of("SWEEP_ORIENTATION") {
+        return match orientation_str {
+            "Horizontal" | "horizontal" | "h" => Orientation::Horizontal,
+            _ => Orientation::Vertical,
+        };
+    }
+
+    return Orientation::Vertical;
 }
 
 fn get_miter_limit(matches: &ArgMatches) -> Option<f32> {
@@ -551,8 +605,8 @@ fn get_hatching_angle(matches: &ArgMatches) -> Angle<f32> {
     return Angle::zero();
 }
 
-fn get_output(matches: &ArgMatches) -> Box<Write> {
-    let mut output: Box<Write> = Box::new(stdout());
+fn get_output(matches: &ArgMatches) -> Box<dyn Write> {
+    let mut output: Box<dyn Write> = Box::new(stdout());
     if let Some(output_file) = matches.value_of("OUTPUT") {
         if let Ok(file) = File::create(output_file) {
             output = Box::new(file);
@@ -567,7 +621,7 @@ fn get_tessellator(matches: &ArgMatches) -> Tessellator {
             "default" => Tessellator::Default,
             "libtess2" => Tessellator::Tess2,
             _ => Tessellator::Default,
-        }
+        };
     }
     return Tessellator::Default;
 }

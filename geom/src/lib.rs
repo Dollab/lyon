@@ -1,5 +1,8 @@
 #![doc(html_logo_url = "https://nical.github.io/lyon-doc/lyon-logo.svg")]
 #![deny(bare_trait_objects)]
+#![deny(unconditional_recursion)]
+#![allow(clippy::many_single_char_names)]
+#![allow(clippy::let_and_return)]
 
 //! Simple 2D geometric primitives on top of euclid.
 //!
@@ -82,44 +85,46 @@ pub use euclid;
 #[macro_use]
 pub extern crate serde;
 
-#[macro_use] mod segment;
-pub mod quadratic_bezier;
-pub mod cubic_bezier;
+#[macro_use]
+mod segment;
 pub mod arc;
-pub mod utils;
-pub mod cubic_to_quadratic;
+pub mod cubic_bezier;
 mod cubic_bezier_intersections;
+pub mod cubic_to_quadratic;
 mod flatten_cubic;
-mod triangle;
 mod line;
 mod monotonic;
+pub mod quadratic_bezier;
+mod triangle;
+pub mod utils;
 
 #[doc(inline)]
-pub use crate::quadratic_bezier::QuadraticBezierSegment;
+pub use crate::arc::{Arc, ArcFlags, SvgArc};
 #[doc(inline)]
 pub use crate::cubic_bezier::CubicBezierSegment;
 #[doc(inline)]
-pub use crate::triangle::{Triangle};
-#[doc(inline)]
-pub use crate::line::{LineSegment, Line, LineEquation};
-#[doc(inline)]
-pub use crate::arc::{Arc, SvgArc, ArcFlags};
-#[doc(inline)]
-pub use crate::segment::{Segment, BezierSegment};
+pub use crate::line::{Line, LineEquation, LineSegment};
 #[doc(inline)]
 pub use crate::monotonic::Monotonic;
+#[doc(inline)]
+pub use crate::quadratic_bezier::QuadraticBezierSegment;
+#[doc(inline)]
+pub use crate::segment::{BezierSegment, Segment};
+#[doc(inline)]
+pub use crate::triangle::Triangle;
+
+pub use crate::scalar::Scalar;
 
 mod scalar {
-    pub(crate) use num_traits::{Float, FloatConst, NumCast};
-    pub(crate) use num_traits::One;
-    pub(crate) use num_traits::cast::cast;
     pub(crate) use euclid::Trig;
+    pub(crate) use num_traits::cast::cast;
+    pub(crate) use num_traits::{Float, FloatConst, NumCast};
 
-    use std::fmt::{Display, Debug};
-    use std::ops::{AddAssign, SubAssign, MulAssign, DivAssign};
+    use std::fmt::{Debug, Display};
+    use std::ops::{AddAssign, DivAssign, MulAssign, SubAssign};
 
-    pub trait Scalar
-        : Float
+    pub trait Scalar:
+        Float
         + NumCast
         + FloatConst
         + Sized
@@ -166,7 +171,9 @@ mod scalar {
         const EPSILON: Self = 1e-5;
 
         #[inline]
-        fn value(v: f32) -> Self { v }
+        fn value(v: f32) -> Self {
+            v
+        }
     }
 
     impl Scalar for f64 {
@@ -186,95 +193,124 @@ mod scalar {
         const EPSILON: Self = 1e-8;
 
         #[inline]
-        fn value(v: f32) -> Self { v as f64 }
+        fn value(v: f32) -> Self {
+            v as f64
+        }
     }
 }
 
-mod generic_math {
-    /// Alias for `euclid::Point2D`.
-    pub use euclid::Point2D as Point;
+/// Alias for `euclid::default::Point2D`.
+pub use euclid::default::Point2D as Point;
 
-    /// Alias for `euclid::Vector2D`.
-    pub use euclid::Vector2D as Vector;
+/// Alias for `euclid::default::Vector2D`.
+pub use euclid::default::Vector2D as Vector;
 
-    /// Alias for `euclid::Size2D`.
-    pub use euclid::Size2D as Size;
+/// Alias for `euclid::default::Size2D`.
+pub use euclid::default::Size2D as Size;
 
-    /// Alias for `euclid::Rect`
-    pub use euclid::Rect;
+/// Alias for `euclid::default::Rect`
+pub use euclid::default::Rect;
 
-    /// Alias for `euclid::Transform2D`
-    pub use euclid::Transform2D;
+/// Alias for `euclid::default::Transform2D`
+pub type Transform<S> = euclid::default::Transform2D<S>;
 
-    /// Alias for `euclid::Rotation2D`
-    pub use euclid::Rotation2D;
+/// Alias for `euclid::default::Rotation2D`
+pub type Rotation<S> = euclid::default::Rotation2D<S>;
 
-    /// An angle in radians.
-    pub use euclid::Angle;
+/// Alias for `euclid::default::Translation2D`
+pub type Translation<S> = euclid::Translation2D<S, euclid::UnknownUnit, euclid::UnknownUnit>;
 
-    /// Shorthand for `Rect::new(Point::new(x, y), Size::new(w, h))`.
-    pub use euclid::rect;
+/// Alias for `euclid::default::Scale`
+pub use euclid::default::Scale;
 
-    /// Shorthand for `Vector::new(x, y)`.
-    pub use euclid::vec2 as vector;
+/// An angle in radians.
+pub use euclid::Angle;
 
-    /// Shorthand for `Point::new(x, y)`.
-    pub use euclid::point2 as point;
-
-    /// Shorthand for `Size::new(x, y)`.
-    pub use euclid::size2 as size;
+/// Shorthand for `Rect::new(Point::new(x, y), Size::new(w, h))`.
+#[inline]
+pub fn rect<S>(x: S, y: S, w: S, h: S) -> Rect<S> {
+    Rect { origin: point(x, y), size: size(w, h) }
 }
 
-pub mod math {
-    //! Basic types that are used everywhere. Most other lyon crates
-    //! reexport them.
-
-    use euclid;
-
-    /// Alias for ```euclid::Point2D<f32>```.
-    pub type Point = euclid::Point2D<f32>;
-
-    /// Alias for ```euclid::Point2D<f64>```.
-    pub type F64Point = euclid::Point2D<f64>;
-
-    /// Alias for ```euclid::Point2D<f32>```.
-    pub type Vector = euclid::Vector2D<f32>;
-
-    /// Alias for ```euclid::Size2D<f32>```.
-    pub type Size = euclid::Size2D<f32>;
-
-    /// Alias for ```euclid::Rect<f32>```
-    pub type Rect = euclid::Rect<f32>;
-
-    /// Alias for ```euclid::Transform2D<f32>```
-    pub type Transform2D = euclid::Transform2D<f32>;
-
-    /// Alias for ```euclid::Rotation2D<f32>```
-    pub type Rotation2D = euclid::Rotation2D<f32>;
-
-    /// An angle in radians (f32).
-    pub type Angle = euclid::Angle<f32>;
-
-    /// Shorthand for `Rect::new(Point::new(x, y), Size::new(w, h))`.
-    pub use euclid::rect;
-
-    /// Shorthand for `Vector::new(x, y)`.
-    pub use euclid::vec2 as vector;
-
-    /// Shorthand for `Point::new(x, y)`.
-    pub use euclid::point2 as point;
-
-    /// Shorthand for `Size::new(x, y)`.
-    pub use euclid::size2 as size;
-
-    /// Anything that can be transformed in 2D.
-    pub trait Transform {
-        fn transform(&self, mat: &Transform2D) -> Self;
-    }
+/// Shorthand for `Vector::new(x, y)`.
+#[inline]
+pub fn vector<S>(x: S, y: S) -> Vector<S> {
+    Vector::new(x, y)
 }
 
+/// Shorthand for `Point::new(x, y)`.
+#[inline]
+pub fn point<S>(x: S, y: S) -> Point<S> {
+    Point::new(x, y)
+}
+
+/// Shorthand for `Size::new(x, y)`.
+#[inline]
+pub fn size<S>(w: S, h: S) -> Size<S> {
+    Size::new(w, h)
+}
 
 pub mod traits {
-    pub use crate::segment::{Segment, FlattenedForEach, FlatteningStep};
+    pub use crate::segment::Segment;
     //pub use monotonic::MonotonicSegment;
+
+    use crate::{Scalar, Point, Rotation, Scale, Transform, Translation, Vector};
+
+    pub trait Transformation<S> {
+        fn transform_point(&self, p: Point<S>) -> Point<S>;
+        fn transform_vector(&self, v: Vector<S>) -> Vector<S>;
+    }
+
+    impl<S: Scalar> Transformation<S> for Transform<S> {
+        fn transform_point(&self, p: Point<S>) -> Point<S> {
+            self.transform_point(p)
+        }
+
+        fn transform_vector(&self, v: Vector<S>) -> Vector<S> {
+            self.transform_vector(v)
+        }
+    }
+
+    impl<S: Scalar> Transformation<S> for Rotation<S> {
+        fn transform_point(&self, p: Point<S>) -> Point<S> {
+            self.transform_point(p)
+        }
+
+        fn transform_vector(&self, v: Vector<S>) -> Vector<S> {
+            self.transform_vector(v)
+        }
+    }
+
+    impl<S: Scalar> Transformation<S> for Translation<S> {
+        fn transform_point(&self, p: Point<S>) -> Point<S> {
+            self.transform_point(p)
+        }
+
+        fn transform_vector(&self, v: Vector<S>) -> Vector<S> {
+            v
+        }
+    }
+
+    impl<S: Scalar> Transformation<S> for Scale<S> {
+        fn transform_point(&self, p: Point<S>) -> Point<S> {
+            self.transform_point(p)
+        }
+
+        fn transform_vector(&self, v: Vector<S>) -> Vector<S> {
+            self.transform_vector(v)
+        }
+    }
+
+    // Automatically implement Transformation for all &Transformation.
+    impl<'l, S: Scalar, T: Transformation<S>> Transformation<S> for &'l T {
+        #[inline]
+        fn transform_point(&self, p: Point<S>) -> Point<S> {
+            (*self).transform_point(p)
+        }
+
+        #[inline]
+        fn transform_vector(&self, v: Vector<S>) -> Vector<S> {
+            (*self).transform_vector(v)
+        }
+    }
 }
