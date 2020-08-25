@@ -283,6 +283,12 @@ impl<OutputVertex, OutputIndex> VertexBuffers<OutputVertex, OutputIndex> {
         VertexBuffers::with_capacity(512, 1024)
     }
 
+    /// Clears the data of the buffers
+    pub fn clear(&mut self) {
+        self.vertices.clear();
+        self.indices.clear();
+    }
+
     /// Constructor
     pub fn with_capacity(num_vertices: usize, num_indices: usize) -> Self {
         VertexBuffers {

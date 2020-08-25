@@ -77,6 +77,11 @@ impl PathBuffer {
     }
 
     #[inline]
+    pub fn builder_modify(&mut self) -> BuilderModify {
+        BuilderModify::new(self)
+    }
+
+    #[inline]
     pub fn clear(&mut self) {
         self.points.clear();
         self.verbs.clear();
@@ -216,6 +221,16 @@ impl<'l> Builder<'l> {
     #[inline]
     pub fn end(&mut self, close: bool) {
         self.builder.end(close)
+    }
+
+    #[inline]
+    pub fn open(&mut self) {
+        self.builder.open()
+    }
+
+    #[inline]
+    pub fn pop(&mut self) {
+        self.builder.pop()
     }
 
     #[inline]
@@ -365,6 +380,146 @@ impl<'l> BuilderWithAttributes<'l> {
     #[inline]
     pub fn reserve(&mut self, endpoints: usize, ctrl_points: usize) {
         self.builder.reserve(endpoints, ctrl_points);
+    }
+}
+
+
+/// A Builder that modifies the last path of an existing PathBuffer.
+/// Implements the `PathBuilder` trait.
+pub struct BuilderModify<'l> {
+    buffer: &'l mut PathBuffer,
+    builder: path::Builder,
+    points_start: u32,
+    verbs_start: u32,
+}
+
+impl<'l> BuilderModify<'l> {
+    #[inline]
+    fn new(buffer: &'l mut PathBuffer) -> Self {
+        let mut builder = path::Builder::new();
+        std::mem::swap(&mut buffer.points, &mut builder.points);
+        std::mem::swap(&mut buffer.verbs, &mut builder.verbs);
+        let points_start = buffer.paths.last().unwrap().points.0;
+        let verbs_start = buffer.paths.last().unwrap().verbs.0;
+        BuilderModify {
+            buffer,
+            builder,
+            points_start,
+            verbs_start,
+        }
+    }
+
+    #[inline]
+    pub fn build(mut self) -> usize {
+        let points_end = self.builder.points.len() as u32;
+        let verbs_end = self.builder.verbs.len() as u32;
+        std::mem::swap(&mut self.builder.points, &mut self.buffer.points);
+        std::mem::swap(&mut self.builder.verbs, &mut self.buffer.verbs);
+
+        let index = self.buffer.paths.len();
+        self.buffer.paths.pop();
+        self.buffer.paths.push(PathDescriptor {
+            points: (self.points_start, points_end),
+            verbs: (self.verbs_start, verbs_end),
+            num_attributes: 0,
+        });
+
+        index
+    }
+
+    #[inline]
+    fn adjust_id(&self, mut id: EndpointId) -> EndpointId {
+        id.0 -= self.points_start;
+
+        id
+    }
+
+    #[inline]
+    pub fn begin(&mut self, at: Point) -> EndpointId {
+        let id = self.builder.begin(at);
+        self.adjust_id(id)
+    }
+
+    #[inline]
+    pub fn end(&mut self, close: bool) {
+        self.builder.end(close)
+    }
+
+    #[inline]
+    pub fn open(&mut self) {
+        debug_assert!(
+            self.builder.verbs.last() == Some(&path::Verb::End) ||
+            self.builder.verbs.last() == Some(&path::Verb::Close)
+        );
+        self.builder.open()
+    }
+
+    #[inline]
+    pub fn pop(&mut self) {
+        debug_assert!(self.builder.points.len() as u32 > self.points_start);
+        self.builder.pop()
+    }
+
+    #[inline]
+    pub fn line_to(&mut self, to: Point) -> EndpointId {
+        let id = self.builder.line_to(to);
+        self.adjust_id(id)
+    }
+
+    #[inline]
+    pub fn quadratic_bezier_to(&mut self, ctrl: Point, to: Point) -> EndpointId {
+        let id = self.builder.quadratic_bezier_to(ctrl, to);
+        self.adjust_id(id)
+    }
+
+    #[inline]
+    pub fn cubic_bezier_to(&mut self, ctrl1: Point, ctrl2: Point, to: Point) -> EndpointId {
+        let id = self.builder.cubic_bezier_to(ctrl1, ctrl2, to);
+        self.adjust_id(id)
+    }
+
+    #[inline]
+    pub fn reserve(&mut self, endpoints: usize, ctrl_points: usize) {
+        self.builder.reserve(endpoints, ctrl_points);
+    }
+}
+
+impl<'l> PathBuilder for BuilderModify<'l> {
+    #[inline]
+    fn begin(&mut self, at: Point) -> EndpointId {
+        self.begin(at)
+    }
+
+    #[inline]
+    fn end(&mut self, close: bool) {
+        self.end(close);
+    }
+
+    #[inline]
+    fn line_to(&mut self, to: Point) -> EndpointId {
+        self.line_to(to)
+    }
+
+    #[inline]
+    fn quadratic_bezier_to(&mut self, ctrl: Point, to: Point) -> EndpointId {
+        self.quadratic_bezier_to(ctrl, to)
+    }
+
+    #[inline]
+    fn cubic_bezier_to(&mut self, ctrl1: Point, ctrl2: Point, to: Point) -> EndpointId {
+        self.cubic_bezier_to(ctrl1, ctrl2, to)
+    }
+
+    #[inline]
+    fn reserve(&mut self, endpoints: usize, ctrl_points: usize) {
+        self.reserve(endpoints, ctrl_points);
+    }
+}
+
+impl<'l> Build for BuilderModify<'l> {
+    type PathType = usize;
+    fn build(self) -> usize {
+        self.build()
     }
 }
 
